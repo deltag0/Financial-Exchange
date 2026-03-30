@@ -31,4 +31,12 @@ services:
       - 8889:8889
       - 4318:4318
 
+  sequencer:
+    build:
+      context: .
+      dockerfile: sequencer/Dockerfile
+    # Share IPC space so other containers can access the /dev/shm message queues
+    ipc: shareable
+    command: sleep infinity
+
 

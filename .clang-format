@@ -1,0 +1,11 @@
+---
+Language: Cpp
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 120
+AccessModifierOffset: -4
+SpacesBeforeTrailingComments: 1
+AllowShortFunctionsOnASingleLine: Empty
+BreakBeforeBraces: Attach
+AlignAfterOpenBracket: Align
+SortIncludes: false
