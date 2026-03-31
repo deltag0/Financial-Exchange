@@ -1,0 +1,30 @@
+# Build artifacts
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.o
+*.a
+*.so
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Claude Code personal files
+CLAUDE.local.md
+.claude/settings.local.json
+
+# Docker
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
