@@ -1,0 +1,3 @@
+For purposes of scalability, we wanted to implement multiple FIX servers such that the load from a high number of clients would be distributed to the fix servers. The main concern that comes with this is the face that we would need to aggregate the messages from all the fix servers and send them to the sequencer in the correct order.
+
+The simplest way to address this problem is by using the shared memory system that is provided from the boost library. Using it, we say that the messages that arrive at a single fix server is the first message for that fix server. Boost's lock free queue handles inserting the messages into the queue in the correct order and sent to the sequencer.
