@@ -1,0 +1,3 @@
+In the matching engine, before processing an order, we're going to need a write-ahead queue such that if the matching engine crashes, we can recover the state of the matching engine by replaying the messages from the write-ahead queue. The write-ahead queue is going to be a queue of messages that are waiting to be processed by the matching engine. 
+
+The messages will be stored in a file on disk, on an external database and in one of our Redis caches.

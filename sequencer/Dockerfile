@@ -3,11 +3,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
-    clangd \
-    clang-format \
-    clang-tidy \
-    gdb \
-    valgrind \
     libboost-all-dev \
     wget \
     && rm -rf /var/lib/apt/lists/*
