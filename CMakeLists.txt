@@ -12,14 +12,17 @@ find_package(Boost 1.71 REQUIRED)
 find_library(QUICKFIX_LIB quickfix REQUIRED)
 
 # --- Core Setup ---
-# core is currently a header-only library
-add_library(core_lib INTERFACE)
-target_include_directories(core_lib INTERFACE 
+# core is a library that includes header-only components and FIX implementations
+add_library(core_lib
+    core/fix/src/fix_task.cpp
+    core/fix/src/fix_parser.cpp
+)
+target_include_directories(core_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/core/shared_queue/include
     ${CMAKE_CURRENT_SOURCE_DIR}/core/fix/include
     ${CMAKE_CURRENT_SOURCE_DIR}/core/task/include
 )
-target_link_libraries(core_lib INTERFACE Boost::headers ${QUICKFIX_LIB})
+target_link_libraries(core_lib PUBLIC Boost::headers ${QUICKFIX_LIB})
 
 # --- Subdirectories ---
 add_subdirectory(sequencer)

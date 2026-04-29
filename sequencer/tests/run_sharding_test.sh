@@ -9,9 +9,9 @@ EXCHANGE_PID=$!
 # Wait for it to start
 sleep 2
 
-# 2. Run the test client
-echo "[Test] Running test_client.py..."
-python3 /app/sequencer/tests/test_client.py
+# 2. Run the test client sender
+echo "[Test] Running send_orders.py..."
+python3 /app/sequencer/tests/send_orders.py
 
 # Give it a second to process the last messages
 sleep 2

@@ -38,6 +38,7 @@ services:
       dockerfile: sequencer/Dockerfile
     volumes:
       - ./sequencer:/app/sequencer
+      - ./core:/app/core
+      - ./exchange.cfg:/app/exchange.cfg
     # Share IPC space so other containers can access the /dev/shm message queues
     ipc: shareable
-    command: sleep infinity

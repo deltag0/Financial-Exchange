@@ -16,16 +16,28 @@ void exchange::sequencer::Sequencer::run() {
                           << " on shard: " << (int)message.shard_id 
                           << " (Ticker: " << message.symbol << ")" << std::endl;
 
-                message.sequence_number = getNextSequenceNumber(message.port);
-                // Further message processing would go here
+                message.globalSequenceNumber = getNextGlobalSequenceNumber(message);
+                message.topicSequenceNumber = getNextTopicSequenceNumber(message);
+
+                if (matchingEngineQueue && !matchingEngineQueue->push(message)) {
+                    std::cerr << "[Sequencer] Failed to forward message ID: "
+                              << message.id << " to matching engine" << std::endl;
+                }
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
 
-uint64_t exchange::sequencer::Sequencer::getNextSequenceNumber(uint64_t port) {
-    return sequenceNumbers[port]++;
+uint64_t exchange::sequencer::Sequencer::getNextGlobalSequenceNumber(const sequenceMessage& message) {
+    return ++globalSequenceNumber;
+}
+
+uint64_t exchange::sequencer::Sequencer::getNextTopicSequenceNumber(const sequenceMessage& message) {
+    topicData &data = topicSequence[message.port];
+    data.lastSenderPort = message.port;
+    return ++data.sequenceNumber;
+
 }
 
 void exchange::sequencer::Sequencer::send() {}
