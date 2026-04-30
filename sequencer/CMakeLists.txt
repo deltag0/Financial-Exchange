@@ -15,3 +15,13 @@ target_link_libraries(sequencer_lib PUBLIC core_lib)
 if(UNIX AND NOT APPLE)
     target_link_libraries(sequencer_lib PRIVATE rt)
 endif()
+
+# E2E throughput tests
+if(GTEST_FOUND)
+    add_executable(e2e_throughput_tests
+        tests/test_e2e_throughput.cpp
+    )
+    target_include_directories(e2e_throughput_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ..)
+    target_link_libraries(e2e_throughput_tests PRIVATE sequencer_lib matching_engine core_lib GTest::gtest GTest::gtest_main)
+    add_test(NAME E2EThroughputTests COMMAND e2e_throughput_tests)
+endif()

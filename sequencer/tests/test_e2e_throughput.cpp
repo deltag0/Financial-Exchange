@@ -1,0 +1,359 @@
+#include <atomic>
+#include <chrono>
+#include <gtest/gtest.h>
+#include <iostream>
+#include <thread>
+
+#include "../../bus/include/bus.hpp"
+#include "../../core/fix/include/fix_task.hpp"
+#include "../../core/shared_queue/include/shared_queue.hpp"
+#include "../../matching_engine/include/matching_engine.hpp"
+#include "../../sequencer/include/sequencer.hpp"
+
+// Pre-include STL headers so the throw(...) macro hack doesn't break them
+#include <cstring>
+#include <memory>
+#include <vector>
+
+#if __cplusplus >= 201703L
+#define throw(...)
+#endif
+
+#include <quickfix/Fields.h>
+#include <quickfix/Message.h>
+#include <quickfix/Session.h>
+#include <quickfix/fix44/NewOrderSingle.h>
+
+#if __cplusplus >= 201703L
+#undef throw
+#endif
+
+using namespace exchange;
+
+namespace {
+// Testable sequencer subclass to call run without infinite loop
+class TestableSequencer : public sequencer::Sequencer {
+  public:
+    using sequencer::Sequencer::Sequencer;
+    void processOnce() {
+        if (!mq_shards.empty() && !mq_shards[0]->empty()) {
+            sequencer::sequenceMessage message;
+            if (mq_shards[0]->pop(message)) {
+                message.globalSequenceNumber = getNextGlobalSequenceNumber(message);
+                message.topicSequenceNumber = getNextTopicSequenceNumber(message);
+                if (mq_shards[0] && !mq_shards[0]->empty()) {
+                    // Process next in queue
+                }
+            }
+        }
+    }
+};
+
+// Testable matching engine subclass
+class TestableMatchingEngine : public matching_engine::MatchingEngine {
+  public:
+    using matching_engine::MatchingEngine::MatchingEngine;
+    void invokeDrain() { drainQueue(sequencerQueue, "Sequencer"); }
+};
+} // namespace
+
+TEST(E2EThroughputTest, SequencerToMatchingEngineThroughput) {
+    // Test: Measure throughput from Sequencer → MatchingEngine (excluding FIX parsing)
+    const int num_shards = 4;
+    const int queue_size = 50000; // Must be < 65535 for boost lockfree
+
+    std::vector<core::SharedQueue<sequencer::sequenceMessage> *> sequencer_queues;
+    for (int i = 0; i < num_shards; ++i) {
+        sequencer_queues.push_back(new core::SharedQueue<sequencer::sequenceMessage>(queue_size));
+    }
+
+    core::SharedQueue<sequencer::sequenceMessage> matching_engine_queue(queue_size);
+    core::Bus<sequencer::sequenceMessage> multicast_bus(131072);
+
+    // Create pipeline components
+    auto sequencer =
+        std::make_unique<sequencer::Sequencer>(sequencer_queues, &matching_engine_queue);
+    auto matching_engine =
+        std::make_unique<matching_engine::MatchingEngine>(&matching_engine_queue, multicast_bus);
+
+    std::atomic<bool> stop_sequencer{false};
+    std::atomic<bool> stop_matching{false};
+    std::atomic<int> messages_sequenced{0};
+    std::atomic<int> messages_matched{0};
+
+    // Sequencer thread: drains input queues and forwards to matching engine
+    std::thread sequencer_thread([&]() {
+        while (!stop_sequencer) {
+            for (int shard = 0; shard < num_shards; ++shard) {
+                if (sequencer_queues[shard]->empty())
+                    continue;
+
+                sequencer::sequenceMessage msg{};
+                if (sequencer_queues[shard]->pop(msg)) {
+                    msg.globalSequenceNumber = sequencer->getNextGlobalSequenceNumber(msg);
+                    msg.topicSequenceNumber = sequencer->getNextTopicSequenceNumber(msg);
+
+                    if (matching_engine_queue.push(msg)) {
+                        messages_sequenced.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        // Queue full, try again
+                        sequencer_queues[shard]->push(msg);
+                    }
+                }
+            }
+            std::this_thread::yield();
+        }
+    });
+
+    // Matching engine thread: drains sequencer queue
+    std::thread matching_thread([&]() {
+        while (!stop_matching || !matching_engine_queue.empty()) {
+            sequencer::sequenceMessage msg{};
+            if (matching_engine_queue.pop(msg)) {
+                matching_engine->send(msg);
+                messages_matched.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                std::this_thread::yield();
+            }
+        }
+    });
+
+    // Client simulation: spam messages for 1 second
+    auto start = std::chrono::high_resolution_clock::now();
+    auto end_time = start + std::chrono::seconds(1);
+    int client_messages_sent = 0;
+
+    while (std::chrono::high_resolution_clock::now() < end_time) {
+        sequencer::sequenceMessage msg{};
+        msg.id = client_messages_sent;
+        msg.shard_id = client_messages_sent % num_shards;
+        msg.price = (client_messages_sent % 100) + 1;
+        msg.quantity = 10;
+        msg.port = (client_messages_sent % 100);
+        msg.topic = msg.port;
+        strcpy(msg.symbol, "TEST");
+        msg.type = sequencer::orderType::BUY;
+
+        if (sequencer_queues[msg.shard_id]->push(msg)) {
+            client_messages_sent++;
+        } else {
+            // Queue full, back off briefly
+            std::this_thread::yield();
+        }
+    }
+
+    auto send_end = std::chrono::high_resolution_clock::now();
+    auto send_duration_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(send_end - start).count();
+
+    // Wait for pipeline to drain (up to 500ms)
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    stop_sequencer = true;
+    sequencer_thread.join();
+
+    // Give matching engine time to finish
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    stop_matching = true;
+    matching_thread.join();
+
+    auto end = std::chrono::high_resolution_clock::now();
+    auto total_duration_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+    int seq_count = messages_sequenced.load();
+    int match_count = messages_matched.load();
+    double client_throughput = (client_messages_sent * 1000.0) / send_duration_ms;
+    double total_throughput = (match_count * 1000.0) / total_duration_ms;
+
+    std::cout << "\n========== E2E Throughput Test Results ==========" << std::endl;
+    std::cout << "Client send phase: " << send_duration_ms << " ms" << std::endl;
+    std::cout << "  Messages sent by clients: " << client_messages_sent << std::endl;
+    std::cout << "  Client throughput: " << client_throughput << " msg/sec" << std::endl;
+    std::cout << "\nPipeline processing:" << std::endl;
+    std::cout << "  Messages sequenced: " << seq_count << std::endl;
+    std::cout << "  Messages matched: " << match_count << std::endl;
+    std::cout << "  Total time: " << total_duration_ms << " ms" << std::endl;
+    std::cout << "  End-to-end throughput: " << total_throughput << " msg/sec" << std::endl;
+    std::cout << "  Avg time per message: " << (total_duration_ms * 1000.0 / match_count) << " us"
+              << std::endl;
+    std::cout << "===============================================\n" << std::endl;
+
+    // Cleanup
+    for (auto q : sequencer_queues) {
+        delete q;
+    }
+
+    // Sanity checks
+    EXPECT_GT(client_messages_sent, 0);
+    EXPECT_GT(seq_count, 0);
+    EXPECT_GT(match_count, 0);
+    EXPECT_EQ(seq_count, match_count);
+}
+
+TEST(E2EThroughputTest, FullPipelineWithFixParsing) {
+    // Test: Measure throughput from FixTask (FIX parsing) → Sequencer → MatchingEngine
+    const int num_shards = 4;
+    const int queue_size = 50000;
+
+    // Setup pipeline queues
+    std::vector<core::SharedQueue<sequencer::sequenceMessage> *> sequencer_queues;
+    for (int i = 0; i < num_shards; ++i) {
+        sequencer_queues.push_back(new core::SharedQueue<sequencer::sequenceMessage>(queue_size));
+    }
+
+    core::SharedQueue<sequencer::sequenceMessage> matching_engine_queue(queue_size);
+    core::Bus<sequencer::sequenceMessage> multicast_bus(131072);
+
+    // Create FixTask
+    core::task::FixTask fix_task(sequencer_queues, multicast_bus);
+    auto fix_queue = fix_task.getFixMessageQueue();
+
+    // Create sequencer and matching engine
+    auto sequencer =
+        std::make_unique<sequencer::Sequencer>(sequencer_queues, &matching_engine_queue);
+    auto matching_engine =
+        std::make_unique<matching_engine::MatchingEngine>(&matching_engine_queue, multicast_bus);
+
+    std::atomic<bool> stop_fix{false};
+    std::atomic<bool> stop_sequencer{false};
+    std::atomic<bool> stop_matching{false};
+    std::atomic<int> messages_from_fix{0};
+    std::atomic<int> messages_sequenced{0};
+    std::atomic<int> messages_matched{0};
+
+    // FixTask processing thread: drain fix queue and push to sequencer queues
+    std::thread fix_thread([&]() {
+        while (!stop_fix || !fix_queue->empty()) {
+            sequencer::sequenceMessage msg;
+            if (fix_queue->pop(msg)) {
+                messages_from_fix.fetch_add(1, std::memory_order_relaxed);
+                int shard = msg.shard_id % num_shards;
+                while (!sequencer_queues[shard]->push(msg) && !stop_fix) {
+                    std::this_thread::yield();
+                }
+            } else {
+                std::this_thread::yield();
+            }
+        }
+    });
+
+    // Sequencer thread
+    std::thread sequencer_thread([&]() {
+        while (!stop_sequencer) {
+            for (int shard = 0; shard < num_shards; ++shard) {
+                if (sequencer_queues[shard]->empty())
+                    continue;
+
+                sequencer::sequenceMessage msg{};
+                if (sequencer_queues[shard]->pop(msg)) {
+                    msg.globalSequenceNumber = sequencer->getNextGlobalSequenceNumber(msg);
+                    msg.topicSequenceNumber = sequencer->getNextTopicSequenceNumber(msg);
+
+                    if (matching_engine_queue.push(msg)) {
+                        messages_sequenced.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        sequencer_queues[shard]->push(msg);
+                    }
+                }
+            }
+            std::this_thread::yield();
+        }
+    });
+
+    // Matching engine thread
+    std::thread matching_thread([&]() {
+        while (!stop_matching || !matching_engine_queue.empty()) {
+            sequencer::sequenceMessage msg{};
+            if (matching_engine_queue.pop(msg)) {
+                matching_engine->send(msg);
+                messages_matched.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                std::this_thread::yield();
+            }
+        }
+    });
+
+    // Simulate FIX clients sending actual FIX messages for 1 second
+    auto start = std::chrono::high_resolution_clock::now();
+    auto end_time = start + std::chrono::seconds(1);
+    int fix_messages_injected = 0;
+
+    // Create a dummy session ID for FIX messages
+    FIX::SessionID sessionID("FIX.4.4", "SENDER", "TARGET");
+
+    while (std::chrono::high_resolution_clock::now() < end_time) {
+        // Create a FIX NewOrderSingle message
+        FIX44::NewOrderSingle order;
+
+        // Required fields for order
+        order.set(FIX::ClOrdID(std::to_string(fix_messages_injected)));
+        order.set(FIX::Symbol("TEST"));
+        order.set(FIX::Side(FIX::Side_BUY)); // Buy order
+        order.set(FIX::TransactTime());
+        order.set(FIX::OrderQty(10.0));
+        order.set(FIX::Price((fix_messages_injected % 100) + 1.0));
+        order.set(FIX::OrdType(FIX::OrdType_LIMIT));
+
+        // Send through FixTask's fromApp() to parse into sequenceMessage
+        try {
+            fix_task.fromApp(order, sessionID);
+            fix_messages_injected++;
+        } catch (...) {
+            std::this_thread::yield();
+        }
+    }
+
+    auto send_end = std::chrono::high_resolution_clock::now();
+    auto send_duration_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(send_end - start).count();
+
+    // Wait for pipeline to drain
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    stop_fix = true;
+    fix_thread.join();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    stop_sequencer = true;
+    sequencer_thread.join();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    stop_matching = true;
+    matching_thread.join();
+
+    auto end = std::chrono::high_resolution_clock::now();
+    auto total_duration_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+    int fix_count = messages_from_fix.load();
+    int seq_count = messages_sequenced.load();
+    int match_count = messages_matched.load();
+
+    std::cout << "\n========== Full Pipeline (FIX + Sequencer + MatchingEngine) =========="
+              << std::endl;
+    std::cout << "FIX message injection: " << send_duration_ms << " ms" << std::endl;
+    std::cout << "  Messages injected: " << fix_messages_injected << std::endl;
+    std::cout << "  Injection throughput: " << (fix_messages_injected * 1000.0 / send_duration_ms)
+              << " msg/sec" << std::endl;
+    std::cout << "\nFull pipeline processing:" << std::endl;
+    std::cout << "  Messages from FIX queue: " << fix_count << std::endl;
+    std::cout << "  Messages sequenced: " << seq_count << std::endl;
+    std::cout << "  Messages matched: " << match_count << std::endl;
+    std::cout << "  Total time: " << total_duration_ms << " ms" << std::endl;
+    std::cout << "  End-to-end throughput: " << (match_count * 1000.0 / total_duration_ms)
+              << " msg/sec" << std::endl;
+    std::cout << "  Avg time per message: " << (total_duration_ms * 1000.0 / match_count) << " us"
+              << std::endl;
+    std::cout << "====================================================================\n"
+              << std::endl;
+
+    // Cleanup
+    for (auto q : sequencer_queues) {
+        delete q;
+    }
+
+    // Sanity checks
+    EXPECT_GT(fix_messages_injected, 0);
+    EXPECT_GT(fix_count, 0);
+    EXPECT_GT(seq_count, 0);
+    EXPECT_GT(match_count, 0);
+}
