@@ -1,30 +1,28 @@
-# Observability
+# Exchange — Overview
 
-A containerized exchange sequencer system with a built-in observability stack. The project provides a high-performance C++ order sequencer communicating over shared memory, a lightweight Node.js backend, and full metrics collection via OpenTelemetry and Prometheus.
+This repository contains a performant, containerized exchange platform designed for experimenting with high-throughput order sequencing, IPC-based components, and observability. It combines a C++ sequencer and core IPC library with a lightweight Node.js API, and an OpenTelemetry → Prometheus metrics pipeline.
 
-## Services
+## Components
 
-| Service | Description | Port |
-|---------|-------------|------|
-| `backend` | Node.js HTTP server | 5000 |
-| `frontend` | Nginx static server | 5173 |
-| `sequencer` | C++ order sequencer (IPC) | — |
-| `otel` | OpenTelemetry Collector | 4318 (OTLP), 8889 (metrics) |
-| `prometheus` | Metrics storage & UI | 9090 |
+- **Sequencer (C++)** — assigns monotonic sequence numbers to incoming orders and exposes IPC queues for downstream consumers. See [sequencer](sequencer/).
+- **Core IPC library (C++)** — header-only `SharedQueue` utilities used by the sequencer and other processes. See [core](core/).
+- **Backend API (Node.js)** — REST surface for clients, validating requests and forwarding messages to the sequencer. See [backend](backend/).
+- **Engine (placeholder)** — intended matching engine component; currently not implemented. See [engine](engine/).
+- **Frontend (placeholder)** — Dockerfile + Nginx template for a future UI. See [frontend](frontend/).
+- **Observability** — OpenTelemetry Collector configuration and Prometheus scraping for metrics. See [otel/config.yaml](otel/config.yaml) and [prometheus/prometheus.yml](prometheus/prometheus.yml).
 
-## Stack
+## Tech Stack
 
-- **C++20** — sequencer and core IPC library (Boost.Interprocess)
-- **Node.js 20** — backend API
-- **Nginx** — frontend server
-- **OpenTelemetry Collector** — metrics pipeline
-- **Prometheus** — metrics storage and visualization
-- **Docker Compose** — service orchestration
-- **CMake 3.20+** — C++ build system
+- C++20, Boost.Interprocess (IPC)
+- Node.js (CommonJS) for the API
+- CMake for native builds
+- Docker & Docker Compose for local stacks
+- OpenTelemetry Collector (OTLP) and Prometheus for metrics
+- Google Test / Node test runner / pytest for testing
 
-## Getting Started
+## Running (Docker Compose)
 
-**Prerequisites:** Docker and Docker Compose.
+Prerequisites: Docker and Docker Compose.
 
 ```bash
 # Build and start all services
@@ -34,28 +32,36 @@ docker-compose up --build
 docker-compose down
 ```
 
-Once running:
+When running locally via Docker:
 - Backend API: http://localhost:5000
 - Prometheus UI: http://localhost:9090
 
-## Building the Sequencer Natively
+## Native C++ Build (sequencer)
 
 Requires a C++20 compiler, CMake 3.20+, and Boost 1.71+.
 
 ```bash
-mkdir build && cd build
-cmake -B . -S ..
-cmake --build . --target sequencer_app -j$(nproc)
+cmake -B build -S .
+cmake --build build --target sequencer_app
 ```
 
-## Project Structure
+## API Conventions
 
-```
-backend/        Node.js backend service
-frontend/       Nginx frontend (Dockerfile only, app not yet implemented)
-sequencer/      C++ sequencer service
-core/           Shared header-only IPC library (SharedQueue)
-engine/         Placeholder for the matching engine (not yet implemented)
-otel/           OpenTelemetry Collector configuration
-prometheus/     Prometheus configuration
-```
+The backend follows strict API conventions for order messages (JSON, integer fixed-point for amounts, validation rules, and specific HTTP status codes). See `.claude/rules/api-conventions.md` for full details.
+
+## Observability
+
+All HTTP routes and critical operations emit OTel metrics (counters and histograms) and push to the collector at `http://otel:4318`. The collector is configured to expose a Prometheus-compatible metrics endpoint.
+
+## Testing
+
+- C++ unit tests use Google Test (see `sequencer/tests` and `core/tests`).
+- Backend tests use the Node.js built-in test runner (`backend/tests`).
+- Integration tests and simple Python clients for the sequencer live in `sequencer/tests`.
+
+## Useful files
+
+- [backend/index.js](backend/index.js) — Node HTTP entrypoint
+- [sequencer/include/sequencer.hpp](sequencer/include/sequencer.hpp) — sequencer API
+- [otel/config.yaml](otel/config.yaml) — OTel Collector config
+---
