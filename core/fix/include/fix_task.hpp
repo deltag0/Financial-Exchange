@@ -42,6 +42,8 @@ class FixTask : public FIX::Application, public Task<sequencer::sequenceMessage>
         : Task<sequencer::sequenceMessage>(sequencerQueues), multicastBus(multicastBus) {
         internalQueues.fixMessageQueue =
             std::make_unique<core::SharedQueue<sequencer::sequenceMessage>>(1000);
+
+        multicastBus.registerCursor(cursor);
     }
     virtual ~FixTask() = default;
 
@@ -60,13 +62,14 @@ class FixTask : public FIX::Application, public Task<sequencer::sequenceMessage>
     void sendFixMessage(FIX::Message &message, const FIX::SessionID &sessionID);
     void sendSequencerMessage(sequencer::sequenceMessage &message);
     void run() override;
-    void send() override;
+    void send(sequencer::sequenceMessage &message) override;
 
   private:
     // Internal Queues to process bursts of messages from FIX sessions and internal business
     // messages
     InternalQueues internalQueues;
     Bus<sequencer::sequenceMessage> &multicastBus;
+    std::atomic<Bus<int>::cursor_type> cursor{0};
 };
 
 } // namespace exchange::core::task

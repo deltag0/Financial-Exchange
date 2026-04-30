@@ -68,9 +68,40 @@ template <typename T> class Bus {
      * recomputation on every write, but will recompute if the next write would exceed the
      * cached minimum + size.
      */
-    template <typename U> bool writeImpl(U &&value);
+    template <typename U> bool writeImpl(U &&value) {
+        const cursor_type current_write = write_sequence_.load(std::memory_order_relaxed);
 
-    cursor_type recomputeMinimumCursor() const;
+        if (!reader_cursors_.empty()) {
+            cursor_type cached_min = cached_min_cursor_.load(std::memory_order_acquire);
+            if (current_write >= cached_min + size_) {
+                cached_min = recomputeMinimumCursor();
+                cached_min_cursor_.store(cached_min, std::memory_order_release);
+
+                if (current_write >= cached_min + size_) {
+                    return false;
+                }
+            }
+        }
+
+        buffer_[static_cast<std::size_t>(current_write % size_)] = std::forward<U>(value);
+        write_sequence_.store(current_write + 1, std::memory_order_release);
+        return true;
+    }
+
+    cursor_type recomputeMinimumCursor() const {
+        const cursor_type current_write = write_sequence_.load(std::memory_order_acquire);
+        cursor_type minimum_cursor = current_write;
+
+        for (const std::atomic<cursor_type> *cursor : reader_cursors_) {
+            if (cursor == nullptr) {
+                continue;
+            }
+
+            minimum_cursor = std::min(minimum_cursor, cursor->load(std::memory_order_acquire));
+        }
+
+        return minimum_cursor;
+    }
 
   private:
     std::size_t size_;
@@ -85,5 +116,3 @@ template <typename T> class Bus {
 };
 
 } // namespace exchange::core
-
-#include "../src/bus.cpp"

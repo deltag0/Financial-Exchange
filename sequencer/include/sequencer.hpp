@@ -1,11 +1,12 @@
 #pragma once
 #include <atomic>
 #include <cstdint>
+#include <queue>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
-#include <queue>
+
 
 #include "../../core/task/include/task.hpp"
 
@@ -61,26 +62,25 @@ struct topicData {
 };
 
 class Sequencer : public exchange::core::task::Task<sequenceMessage> {
-public:
-    Sequencer(std::vector<core::SharedQueue<sequenceMessage>*> mq_shards,
-              core::SharedQueue<sequenceMessage>* matchingEngineQueue = nullptr)
+  public:
+    Sequencer(std::vector<core::SharedQueue<sequenceMessage> *> mq_shards,
+              core::SharedQueue<sequenceMessage> *matchingEngineQueue = nullptr)
         : Task{std::move(mq_shards)}, matchingEngineQueue(matchingEngineQueue) {}
 
     void run() override;
-    void send() override;
-    uint64_t getNextGlobalSequenceNumber(const sequenceMessage& message);
-    uint64_t getNextTopicSequenceNumber(const sequenceMessage& message);
+    void send(sequenceMessage &message) override;
+    uint64_t getNextGlobalSequenceNumber(const sequenceMessage &message);
+    uint64_t getNextTopicSequenceNumber(const sequenceMessage &message);
 
-private:
+  private:
     void convertToSequenceMessage() {}
 
-private:
+  private:
     // Global sequence number
     uint64_t globalSequenceNumber = 0;
 
     std::unordered_map<uint64_t, topicData> topicSequence;
-    core::SharedQueue<sequenceMessage>* matchingEngineQueue = nullptr;
-
+    core::SharedQueue<sequenceMessage> *matchingEngineQueue = nullptr;
 };
 
 } // namespace sequencer

@@ -1,7 +1,7 @@
 #include "../include/sequencer.hpp"
+#include <chrono>
 #include <cstdint>
 #include <iostream>
-#include <chrono>
 #include <thread>
 
 void exchange::sequencer::Sequencer::run() {
@@ -12,16 +12,16 @@ void exchange::sequencer::Sequencer::run() {
             sequenceMessage message;
 
             if (mq_shards[0]->pop(message)) {
-                std::cout << "[Sequencer] Processing message ID: " << message.id 
-                          << " on shard: " << (int)message.shard_id 
+                std::cout << "[Sequencer] Processing message ID: " << message.id
+                          << " on shard: " << (int)message.shard_id
                           << " (Ticker: " << message.symbol << ")" << std::endl;
 
                 message.globalSequenceNumber = getNextGlobalSequenceNumber(message);
                 message.topicSequenceNumber = getNextTopicSequenceNumber(message);
 
                 if (matchingEngineQueue && !matchingEngineQueue->push(message)) {
-                    std::cerr << "[Sequencer] Failed to forward message ID: "
-                              << message.id << " to matching engine" << std::endl;
+                    std::cerr << "[Sequencer] Failed to forward message ID: " << message.id
+                              << " to matching engine" << std::endl;
                 }
             }
         }
@@ -29,15 +29,16 @@ void exchange::sequencer::Sequencer::run() {
     }
 }
 
-uint64_t exchange::sequencer::Sequencer::getNextGlobalSequenceNumber(const sequenceMessage& message) {
+uint64_t
+exchange::sequencer::Sequencer::getNextGlobalSequenceNumber(const sequenceMessage &message) {
     return ++globalSequenceNumber;
 }
 
-uint64_t exchange::sequencer::Sequencer::getNextTopicSequenceNumber(const sequenceMessage& message) {
+uint64_t
+exchange::sequencer::Sequencer::getNextTopicSequenceNumber(const sequenceMessage &message) {
     topicData &data = topicSequence[message.port];
     data.lastSenderPort = message.port;
     return ++data.sequenceNumber;
-
 }
 
-void exchange::sequencer::Sequencer::send() {}
+void exchange::sequencer::Sequencer::send(sequenceMessage &) {}
