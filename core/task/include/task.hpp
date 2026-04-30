@@ -7,6 +7,16 @@
 
 namespace exchange::core::task {
 
+enum class TimeInForce {
+    DAY = '0',
+    GTC = '1',
+    IOC = '3',
+    FOK = '4',
+    GTX = '5',
+    ATC = '7',
+    GTD = '6'
+};
+
 template <typename T> class Task {
   public:
     using sequenceMessage = T;

@@ -1,23 +1,23 @@
 #include "../include/fix_parser.hpp"
-#include <quickfix/Fields.h>
+#include <atomic>
+#include <chrono>
 #include <cstring>
 #include <functional>
-#include <chrono>
 #include <iostream>
-#include <atomic>
+#include <quickfix/Fields.h>
+#include <quickfix/FixFields.h>
 
 namespace exchange::core::fix {
 
 // Global order counter
 std::atomic<uint64_t> orderCounter{0};
 
-bool isProcessableMessageType(const std::string& msgType) {
+bool isProcessableMessageType(const std::string &msgType) {
     return msgType == "D" || msgType == "F";
 }
 
-sequencer::sequenceMessage parseFixMessage(const FIX::Message& fixMessage, 
-                                            const FIX::SessionID& sessionID,
-                                            size_t numShards) {
+sequencer::sequenceMessage parseFixMessage(const FIX::Message &fixMessage,
+                                           const FIX::SessionID &sessionID, size_t numShards) {
     try {
         FIX::MsgType msgType;
         fixMessage.getHeader().getField(msgType);
@@ -32,9 +32,8 @@ sequencer::sequenceMessage parseFixMessage(const FIX::Message& fixMessage,
             FIX::Side side;
             if (fixMessage.isSetField(side)) {
                 fixMessage.getField(side);
-                seqMsg.type = (side.getValue() == FIX::Side_BUY) 
-                    ? sequencer::orderType::BUY 
-                    : sequencer::orderType::SELL;
+                seqMsg.type = (side.getValue() == FIX::Side_BUY) ? sequencer::orderType::BUY
+                                                                 : sequencer::orderType::SELL;
             }
         }
 
@@ -75,16 +74,22 @@ sequencer::sequenceMessage parseFixMessage(const FIX::Message& fixMessage,
             seqMsg.id = std::hash<std::string>{}(clOrdID.getValue());
         }
 
+        FIX::TimeInForce tif;
+        if (fixMessage.isSetField(tif)) {
+            fixMessage.getField(tif);
+            seqMsg.tif = static_cast<exchange::core::task::TimeInForce>(tif.getValue());
+        }
+
         // Assign global order counter and timestamp
         seqMsg.order = orderCounter.fetch_add(1, std::memory_order_seq_cst);
         seqMsg.timestamp = std::chrono::high_resolution_clock::now().time_since_epoch().count();
 
         return seqMsg;
 
-    } catch (const FIX::FieldNotFound& e) {
+    } catch (const FIX::FieldNotFound &e) {
         std::cerr << "[FixParser] Required field missing: " << e.field << std::endl;
         throw;
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         std::cerr << "[FixParser] Error parsing FIX message: " << e.what() << std::endl;
         throw;
     }

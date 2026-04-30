@@ -7,7 +7,6 @@
 #include <unordered_set>
 #include <utility>
 
-
 #include "../../core/task/include/task.hpp"
 
 namespace exchange {
@@ -50,6 +49,7 @@ struct sequenceMessage {
     char symbol[10];
     orderType type;
     uint8_t shard_id;
+    core::task::TimeInForce tif;
 };
 
 /*
