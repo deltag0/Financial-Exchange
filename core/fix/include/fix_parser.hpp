@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../../shared_queue/include/shared_queue.hpp"
 #include "../../../sequencer/include/sequencer.hpp"
+#include "../../shared_queue/include/shared_queue.hpp"
 
 // Pre-include STL headers so the throw(...) macro hack doesn't break them.
 #include <atomic>
@@ -26,6 +26,11 @@
 
 namespace exchange::core::fix {
 
+class FixValidationError : public std::runtime_error {
+  public:
+    explicit FixValidationError(const std::string &message) : std::runtime_error(message) {}
+};
+
 /**
  * Parses a FIX message and converts it to a sequencer message
  * @param fixMessage The incoming FIX message
@@ -33,15 +38,14 @@ namespace exchange::core::fix {
  * @param numShards The total number of message queue shards
  * @return A sequenceMessage ready to be queued, or empty if message type is not supported
  */
-exchange::sequencer::sequenceMessage parseFixMessage(const FIX::Message& fixMessage, 
-                                            const FIX::SessionID& sessionID,
-                                            size_t numShards);
+exchange::sequencer::sequenceMessage
+parseFixMessage(const FIX::Message &fixMessage, const FIX::SessionID &sessionID, size_t numShards);
 
 /**
  * Determines if a message is a type we should process (New Order or Cancel Order)
  * @param msgType The FIX message type
  * @return true if message type is 'D' (New Order) or 'F' (Cancel Order)
  */
-bool isProcessableMessageType(const std::string& msgType);
+bool isProcessableMessageType(const std::string &msgType);
 
 } // namespace exchange::core::fix

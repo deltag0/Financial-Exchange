@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <queue>
 #include <string>
@@ -35,6 +36,9 @@ price: price of the order
 quantity: quantity of the order
 symbol: symbol of the order
 type: type of the order
+expiry: expiry time of the order
+shard_id: shard ID assigned by the sequencer for the order
+tif: time in force of the order
 */
 struct sequenceMessage {
     uint64_t id;
@@ -48,6 +52,7 @@ struct sequenceMessage {
     uint64_t quantity;
     char symbol[10];
     orderType type;
+    std::chrono::system_clock::time_point expiry;
     uint8_t shard_id;
     core::task::TimeInForce tif;
 };

@@ -11,6 +11,7 @@ TEST(FixMalformed, MalformedNumericFieldsThrow) {
     msg.setField(FIX::ClOrdID("MAL1"));
     msg.setField(FIX::Symbol("MALS"));
     msg.setField(FIX::Side(FIX::Side_BUY));
+    msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
     // Intentionally set non-numeric OrderQty and Price using StringField
     msg.setField(FIX::StringField(38, "not-a-number"));
     msg.setField(FIX::StringField(44, "nope"));
@@ -30,6 +31,7 @@ TEST(FixMalformed, FixTaskFromAppHandlesMalformed) {
     msg.setField(FIX::ClOrdID("MAL2"));
     msg.setField(FIX::Symbol("MALS"));
     msg.setField(FIX::Side(FIX::Side_BUY));
+    msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
     msg.setField(FIX::StringField(38, "not-a-number"));
 
     FIX::SessionID sid("FIX.4.4", "S", "T");
@@ -47,6 +49,8 @@ TEST(FixMalformed, VeryLongSymbolTruncatesSafely) {
     msg.setField(FIX::Symbol(longsym));
     msg.setField(FIX::Side(FIX::Side_SELL));
     msg.setField(FIX::OrderQty(1));
+    msg.setField(FIX::Price(1.01));
+    msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
 
     FIX::SessionID sid("FIX.4.4", "S", "T");
     auto seq = exchange::core::fix::parseFixMessage(msg, sid, 4);
@@ -63,6 +67,8 @@ TEST(FixMalformed, NonAsciiSymbolHandled) {
     msg.setField(FIX::Symbol(uni));
     msg.setField(FIX::Side(FIX::Side_BUY));
     msg.setField(FIX::OrderQty(2));
+    msg.setField(FIX::Price(1.01));
+    msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
 
     FIX::SessionID sid("FIX.4.4", "S", "T");
     auto seq = exchange::core::fix::parseFixMessage(msg, sid, 2);

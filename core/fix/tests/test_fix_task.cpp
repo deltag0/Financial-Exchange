@@ -23,6 +23,7 @@ TEST(FixTaskTest, FromAppPushesToQueue) {
     msg.setField(FIX::Side(FIX::Side_BUY));
     msg.setField(FIX::OrderQty(5));
     msg.setField(FIX::Price(1.23));
+    msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
 
     FIX::SessionID sid("FIX.4.4", "SENDER", "TARGET");
 

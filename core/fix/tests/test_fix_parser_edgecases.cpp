@@ -24,15 +24,10 @@ TEST(FixParserEdgeCases, MissingSymbolQtyPriceClOrdIDTIF) {
     FIX::Message msg;
     msg.getHeader().setField(FIX::MsgType("D"));
     msg.setField(FIX::Side(FIX::Side_SELL));
+    msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
 
     FIX::SessionID sid("FIX.4.4", "S", "T");
-    auto seq = exchange::core::fix::parseFixMessage(msg, sid, 5);
-
-    EXPECT_EQ(seq.type, orderType::SELL);
-    EXPECT_EQ(seq.quantity, 0);
-    EXPECT_EQ(seq.price, 0);
-    EXPECT_EQ(seq.id, 0);
-    EXPECT_STREQ(seq.symbol, "");
+    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, 5), FIX::FieldNotFound);
 }
 
 TEST(FixParserEdgeCases, LargeValuesAndOrderCounter) {
@@ -43,6 +38,7 @@ TEST(FixParserEdgeCases, LargeValuesAndOrderCounter) {
     msg1.setField(FIX::Side(FIX::Side_BUY));
     msg1.setField(FIX::OrderQty(static_cast<double>(1000000000))); // 1e9
     msg1.setField(FIX::Price(123456.789));
+    msg1.setField(FIX::OrdType(FIX::OrdType_LIMIT));
 
     FIX::SessionID sid("FIX.4.4", "S", "T");
     auto seq1 = exchange::core::fix::parseFixMessage(msg1, sid, 2);
@@ -118,4 +114,128 @@ TEST(FixTaskEdgeCases, CancelMessagePushesToQueue) {
     EXPECT_TRUE(fix_task.getFixMessageQueue()->pop(out));
     EXPECT_EQ(out.type, orderType::CANCEL);
     EXPECT_STREQ(out.symbol, "CXL");
+}
+
+TEST(FixParserValidation, DayOrderRejectsExplicitExpireTime) {
+    FIX::Message msg;
+    msg.getHeader().setField(FIX::MsgType("D"));
+    msg.setField(FIX::ClOrdID("DAYEXP"));
+    msg.setField(FIX::Symbol("TEST"));
+    msg.setField(FIX::Side(FIX::Side_BUY));
+    msg.setField(FIX::OrderQty(100));
+    msg.setField(FIX::Price(12.34));
+    msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
+    msg.setField(FIX::TimeInForce(FIX::TimeInForce_DAY));
+    msg.setField(FIX::StringField(FIX::FIELD::ExpireTime, "20990101-00:00:00"));
+
+    FIX::SessionID sid("FIX.4.4", "S", "T");
+    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, 1),
+                 exchange::core::fix::FixValidationError);
+}
+
+TEST(FixParserValidation, GtdRequiresFutureExpireTime) {
+    FIX::Message msg;
+    msg.getHeader().setField(FIX::MsgType("D"));
+    msg.setField(FIX::ClOrdID("GTD1"));
+    msg.setField(FIX::Symbol("TEST"));
+    msg.setField(FIX::Side(FIX::Side_BUY));
+    msg.setField(FIX::OrderQty(100));
+    msg.setField(FIX::Price(12.34));
+    msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
+    msg.setField(FIX::TimeInForce(FIX::TimeInForce_GOOD_TILL_DATE));
+
+    FIX::SessionID sid("FIX.4.4", "S", "T");
+    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, 1),
+                 exchange::core::fix::FixValidationError);
+
+    msg.setField(FIX::StringField(FIX::FIELD::ExpireTime, "20000101-00:00:00"));
+    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, 1),
+                 exchange::core::fix::FixValidationError);
+
+    msg.setField(FIX::StringField(FIX::FIELD::ExpireTime, "20990101-00:00:00"));
+    auto seq = exchange::core::fix::parseFixMessage(msg, sid, 1);
+    EXPECT_EQ(seq.tif, TimeInForce::GTD);
+}
+
+TEST(FixParserValidation, IocFokAndGtcRejectExpireTime) {
+    FIX::SessionID sid("FIX.4.4", "S", "T");
+
+    for (char tif : {FIX::TimeInForce_IMMEDIATE_OR_CANCEL, FIX::TimeInForce_FILL_OR_KILL,
+                     FIX::TimeInForce_GOOD_TILL_CANCEL}) {
+        FIX::Message msg;
+        msg.getHeader().setField(FIX::MsgType("D"));
+        msg.setField(FIX::ClOrdID(std::string("TIF") + tif));
+        msg.setField(FIX::Symbol("TEST"));
+        msg.setField(FIX::Side(FIX::Side_BUY));
+        msg.setField(FIX::OrderQty(100));
+        msg.setField(FIX::Price(12.34));
+        msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
+        msg.setField(FIX::TimeInForce(tif));
+        msg.setField(FIX::StringField(FIX::FIELD::ExpireTime, "20990101-00:00:00"));
+
+        EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, 1),
+                     exchange::core::fix::FixValidationError);
+    }
+}
+
+TEST(FixParserValidation, AtcRejectsExplicitExpireTime) {
+    FIX::Message msg;
+    msg.getHeader().setField(FIX::MsgType("D"));
+    msg.setField(FIX::ClOrdID("ATCEXP"));
+    msg.setField(FIX::Symbol("TEST"));
+    msg.setField(FIX::Side(FIX::Side_BUY));
+    msg.setField(FIX::OrderQty(100));
+    msg.setField(FIX::Price(12.34));
+    msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
+    msg.setField(FIX::TimeInForce(FIX::TimeInForce_AT_THE_CLOSE));
+    msg.setField(FIX::StringField(FIX::FIELD::ExpireTime, "20990101-00:00:00"));
+
+    FIX::SessionID sid("FIX.4.4", "S", "T");
+    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, 1),
+                 exchange::core::fix::FixValidationError);
+}
+
+TEST(FixParserValidation, RejectsUnsupportedTifAndOrdType) {
+    FIX::Message msg;
+    msg.getHeader().setField(FIX::MsgType("D"));
+    msg.setField(FIX::ClOrdID("BADTIF"));
+    msg.setField(FIX::Symbol("TEST"));
+    msg.setField(FIX::Side(FIX::Side_BUY));
+    msg.setField(FIX::OrderQty(100));
+    msg.setField(FIX::Price(12.34));
+    msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
+    msg.setField(FIX::TimeInForce(FIX::TimeInForce_GOOD_TILL_CROSSING));
+
+    FIX::SessionID sid("FIX.4.4", "S", "T");
+    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, 1),
+                 exchange::core::fix::FixValidationError);
+
+    msg.setField(FIX::TimeInForce(FIX::TimeInForce_DAY));
+    msg.setField(FIX::OrdType(FIX::OrdType_MARKET));
+    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, 1),
+                 exchange::core::fix::FixValidationError);
+}
+
+TEST(FixTaskValidation, InvalidOrderDoesNotPushToQueue) {
+    exchange::core::SharedQueue<sequenceMessage> seq_q(8);
+    std::vector<exchange::core::SharedQueue<sequenceMessage> *> sequencer_queues{&seq_q};
+    exchange::core::Bus<sequenceMessage> bus(8);
+    FixTask fix_task(sequencer_queues, bus);
+
+    FIX::Message msg;
+    msg.getHeader().setField(FIX::MsgType("D"));
+    msg.setField(FIX::ClOrdID("DAYEXP"));
+    msg.setField(FIX::Symbol("TEST"));
+    msg.setField(FIX::Side(FIX::Side_BUY));
+    msg.setField(FIX::OrderQty(100));
+    msg.setField(FIX::Price(12.34));
+    msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
+    msg.setField(FIX::TimeInForce(FIX::TimeInForce_DAY));
+    msg.setField(FIX::StringField(FIX::FIELD::ExpireTime, "20990101-00:00:00"));
+
+    FIX::SessionID sid("FIX.4.4", "S", "T");
+    fix_task.fromApp(msg, sid);
+
+    sequenceMessage out{};
+    EXPECT_FALSE(fix_task.getFixMessageQueue()->pop(out));
 }
