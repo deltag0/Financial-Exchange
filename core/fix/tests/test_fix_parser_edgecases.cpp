@@ -63,7 +63,7 @@ TEST(FixTaskEdgeCases, NonProcessableMessageDoesNotPush) {
     exchange::core::SharedQueue<sequenceMessage> seq_q(8);
     std::vector<exchange::core::SharedQueue<sequenceMessage> *> sequencer_queues;
     sequencer_queues.push_back(&seq_q);
-    exchange::core::Bus<sequenceMessage> bus(8);
+    exchange::core::Bus bus(8);
 
     FixTask fix_task(sequencer_queues, bus);
 
@@ -81,7 +81,7 @@ TEST(FixTaskEdgeCases, FromAppHandlesMissingHeader) {
     exchange::core::SharedQueue<sequenceMessage> seq_q(8);
     std::vector<exchange::core::SharedQueue<sequenceMessage> *> sequencer_queues;
     sequencer_queues.push_back(&seq_q);
-    exchange::core::Bus<sequenceMessage> bus(8);
+    exchange::core::Bus bus(8);
 
     FixTask fix_task(sequencer_queues, bus);
 
@@ -98,7 +98,7 @@ TEST(FixTaskEdgeCases, CancelMessagePushesToQueue) {
     exchange::core::SharedQueue<sequenceMessage> seq_q(8);
     std::vector<exchange::core::SharedQueue<sequenceMessage> *> sequencer_queues;
     sequencer_queues.push_back(&seq_q);
-    exchange::core::Bus<sequenceMessage> bus(8);
+    exchange::core::Bus bus(8);
 
     FixTask fix_task(sequencer_queues, bus);
 
@@ -219,7 +219,7 @@ TEST(FixParserValidation, RejectsUnsupportedTifAndOrdType) {
 TEST(FixTaskValidation, InvalidOrderDoesNotPushToQueue) {
     exchange::core::SharedQueue<sequenceMessage> seq_q(8);
     std::vector<exchange::core::SharedQueue<sequenceMessage> *> sequencer_queues{&seq_q};
-    exchange::core::Bus<sequenceMessage> bus(8);
+    exchange::core::Bus bus(8);
     FixTask fix_task(sequencer_queues, bus);
 
     FIX::Message msg;

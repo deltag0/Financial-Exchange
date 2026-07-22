@@ -68,7 +68,7 @@ TEST(E2EThroughputTest, SequencerToMatchingEngineThroughput) {
     }
 
     core::SharedQueue<sequencer::sequenceMessage> matching_engine_queue(queue_size);
-    core::Bus<sequencer::sequenceMessage> multicast_bus(131072);
+    core::Bus multicast_bus(131072);
 
     // Create pipeline components
     auto sequencer =
@@ -202,7 +202,7 @@ TEST(E2EThroughputTest, FullPipelineWithFixParsing) {
     }
 
     core::SharedQueue<sequencer::sequenceMessage> matching_engine_queue(queue_size);
-    core::Bus<sequencer::sequenceMessage> multicast_bus(131072);
+    core::Bus multicast_bus(131072);
 
     // Create FixTask
     core::task::FixTask fix_task(sequencer_queues, multicast_bus);

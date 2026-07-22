@@ -14,7 +14,7 @@ namespace exchange::matching_engine {
 class MatchingEngine : public exchange::core::task::Task<sequencer::sequenceMessage> {
   public:
     MatchingEngine(core::SharedQueue<sequencer::sequenceMessage> *sequencerQueue,
-                   core::Bus<sequencer::sequenceMessage> &multicastBus);
+                   core::Bus &multicastBus);
 
     void run() override;
     void send(sequencer::sequenceMessage &message) override;
@@ -71,7 +71,7 @@ class MatchingEngine : public exchange::core::task::Task<sequencer::sequenceMess
     core::SharedQueue<sequencer::sequenceMessage> &sequencerQueue;
 
     // Re-transmission bus for data to ports
-    core::Bus<sequencer::sequenceMessage> &multicastBus;
+    core::Bus &multicastBus;
 
     std::unordered_map<std::string, std::map<uint64_t, PriceLevel, std::greater<uint64_t>>>
         buyOrders;

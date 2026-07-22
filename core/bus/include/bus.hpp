@@ -8,14 +8,17 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
+#include <fstream>
+
+#include "../../../sequencer/include/sequencer.hpp"
 
 namespace exchange::core {
 
-template <typename T> class Bus {
+class Bus {
   public:
     using cursor_type = std::uint64_t;
 
-    explicit Bus(std::size_t size = 1024) : size_(size), buffer_(size) {
+    explicit Bus(std::size_t size = 1024, std::string journalFileName = "") : size_(size), buffer_(size), journalFile{journalFileName} {
         if (size_ == 0) {
             throw std::invalid_argument("Bus size must be greater than zero");
         }
@@ -32,13 +35,13 @@ template <typename T> class Bus {
         return static_cast<int>(cached_min_cursor_.load(std::memory_order_acquire));
     }
 
-    bool write(const T &value) { return writeImpl(value); }
+    bool write(const sequencer::sequenceMessage &value) { return writeImpl(value); }
 
-    bool write(T &&value) { return writeImpl(std::move(value)); }
+    bool write(sequencer::sequenceMessage &&value) { return writeImpl(std::move(value)); }
 
-    bool read(std::atomic<cursor_type> &cursor, T &output) const {
+    bool read(std::atomic<cursor_type> &cursor, sequencer::sequenceMessage &output) const {
         const cursor_type current_cursor = cursor.load(std::memory_order_acquire);
-        const cursor_type next_write = write_sequence_.load(std::memory_order_acquire);
+        const cursor_type next_write = total_writes_.load(std::memory_order_acquire);
 
         if (current_cursor >= next_write) {
             return false;
@@ -50,7 +53,7 @@ template <typename T> class Bus {
         }
 
         const std::size_t index = static_cast<std::size_t>(current_cursor % size_);
-        const std::optional<T> &slot = buffer_[index];
+        const std::optional<sequencer::sequenceMessage> &slot = buffer_[index];
         if (!slot.has_value()) {
             return false;
         }
@@ -69,7 +72,7 @@ template <typename T> class Bus {
      * cached minimum + size.
      */
     template <typename U> bool writeImpl(U &&value) {
-        const cursor_type current_write = write_sequence_.load(std::memory_order_relaxed);
+        const cursor_type current_write = total_writes_.load(std::memory_order_relaxed);
 
         if (!reader_cursors_.empty()) {
             cursor_type cached_min = cached_min_cursor_.load(std::memory_order_acquire);
@@ -84,12 +87,13 @@ template <typename T> class Bus {
         }
 
         buffer_[static_cast<std::size_t>(current_write % size_)] = std::forward<U>(value);
-        write_sequence_.store(current_write + 1, std::memory_order_release);
+        total_writes_.store(current_write + 1, std::memory_order_release);
+        // Store in the journal with format: Write #[number here]: # write message as json
         return true;
     }
 
     cursor_type recomputeMinimumCursor() const {
-        const cursor_type current_write = write_sequence_.load(std::memory_order_acquire);
+        const cursor_type current_write = total_writes_.load(std::memory_order_acquire);
         cursor_type minimum_cursor = current_write;
 
         for (const std::atomic<cursor_type> *cursor : reader_cursors_) {
@@ -106,13 +110,15 @@ template <typename T> class Bus {
   private:
     std::size_t size_;
     // Circular buffer storing data
-    std::vector<std::optional<T>> buffer_;
+    std::vector<std::optional<sequencer::sequenceMessage>> buffer_;
     // Pointers to read cursors for access during writes for checks
     std::vector<std::atomic<cursor_type> *> reader_cursors_;
     // Cached min cursor guaranteed to be <= all read cursors, updated on writes to avoid
     // recomputation
     std::atomic<cursor_type> cached_min_cursor_{0};
-    std::atomic<cursor_type> write_sequence_{0};
+    std::atomic<cursor_type> total_writes_{0};
+
+    std::fstream journalFile;
 };
 
 } // namespace exchange::core

@@ -38,7 +38,7 @@ struct InternalQueues {
 class FixTask : public FIX::Application, public Task<sequencer::sequenceMessage> {
   public:
     FixTask(const std::vector<core::SharedQueue<sequencer::sequenceMessage> *> &sequencerQueues,
-            Bus<sequencer::sequenceMessage> &multicastBus)
+            Bus &multicastBus)
         : Task<sequencer::sequenceMessage>(sequencerQueues), multicastBus(multicastBus) {
         internalQueues.fixMessageQueue =
             std::make_unique<core::SharedQueue<sequencer::sequenceMessage>>(1000);
@@ -68,8 +68,8 @@ class FixTask : public FIX::Application, public Task<sequencer::sequenceMessage>
     // Internal Queues to process bursts of messages from FIX sessions and internal business
     // messages
     InternalQueues internalQueues;
-    Bus<sequencer::sequenceMessage> &multicastBus;
-    std::atomic<Bus<int>::cursor_type> cursor{0};
+    Bus &multicastBus;
+    std::atomic<Bus::cursor_type> cursor{0};
 };
 
 } // namespace exchange::core::task

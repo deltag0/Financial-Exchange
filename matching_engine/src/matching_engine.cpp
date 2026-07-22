@@ -22,7 +22,7 @@ bool hasOrderExpired(const std::chrono::system_clock::time_point expiry) {
 } // namespace
 
 MatchingEngine::MatchingEngine(core::SharedQueue<sequencer::sequenceMessage> *sequencerQueue,
-                               core::Bus<sequencer::sequenceMessage> &multicastBus)
+                               core::Bus &multicastBus)
     : Task(std::vector<core::SharedQueue<sequencer::sequenceMessage> *>{sequencerQueue}),
       sequencerQueue(*sequencerQueue), multicastBus(multicastBus) {}
 
@@ -30,7 +30,6 @@ void MatchingEngine::run() {
     std::cout << "[MatchingEngine] Thread started" << std::endl;
     while (true) {
         drainQueue(sequencerQueue, "Sequencer");
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
 

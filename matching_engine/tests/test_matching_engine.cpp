@@ -39,7 +39,7 @@ sequencer::sequenceMessage makeOrder(uint64_t id, sequencer::orderType type, con
 TEST(MatchingEngineTest, ProcessOnceConsumesQueue) {
     // Arrange: create a shared queue and a bus
     core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus<sequencer::sequenceMessage> bus(8);
+    core::Bus bus(8);
 
     // Construct the testable matching engine
     TestableMatchingEngine engine(&seq_q, bus);
@@ -65,7 +65,7 @@ TEST(MatchingEngineTest, ProcessOnceConsumesQueue) {
 
 TEST(MatchingEngineTest, ProcessOnceEmptyDoesNothing) {
     core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus<sequencer::sequenceMessage> bus(8);
+    core::Bus bus(8);
     TestableMatchingEngine engine(&seq_q, bus);
 
     // Ensure empty initially
@@ -79,7 +79,7 @@ TEST(MatchingEngineTest, ProcessOnceEmptyDoesNothing) {
 
 TEST(MatchingEngineTest, FokBuyDoesNotReuseSameRestingOrderInAvailabilityCheck) {
     core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus<sequencer::sequenceMessage> bus(8);
+    core::Bus bus(8);
     TestableMatchingEngine engine(&seq_q, bus);
 
     auto restingSell =
@@ -97,7 +97,7 @@ TEST(MatchingEngineTest, FokBuyDoesNotReuseSameRestingOrderInAvailabilityCheck) 
 
 TEST(MatchingEngineTest, BuyMatchUpdatesRestingSellLevelQuantity) {
     core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus<sequencer::sequenceMessage> bus(8);
+    core::Bus bus(8);
     TestableMatchingEngine engine(&seq_q, bus);
 
     auto restingSell =

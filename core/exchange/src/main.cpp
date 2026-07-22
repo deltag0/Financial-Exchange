@@ -47,7 +47,7 @@ int main() {
             shard_queue_ptrs.push_back(shard_queues.back().get());
         }
 
-        exchange::core::Bus<exchange::sequencer::sequenceMessage> multicastBus(BUS_SIZE);
+        exchange::core::Bus multicastBus(BUS_SIZE);
 
         // Initialize FIX Application with all shards
         exchange::core::task::FixTask application(shard_queue_ptrs, multicastBus);

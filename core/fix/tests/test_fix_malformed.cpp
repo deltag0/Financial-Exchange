@@ -23,7 +23,7 @@ TEST(FixMalformed, MalformedNumericFieldsThrow) {
 TEST(FixMalformed, FixTaskFromAppHandlesMalformed) {
     exchange::core::SharedQueue<sequenceMessage> q(4);
     std::vector<exchange::core::SharedQueue<sequenceMessage> *> shards{&q};
-    exchange::core::Bus<sequenceMessage> bus(8);
+    exchange::core::Bus bus(8);
     FixTask fix_task(shards, bus);
 
     FIX::Message msg;

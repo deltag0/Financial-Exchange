@@ -6,131 +6,140 @@
 
 namespace exchange::core::test {
 
+namespace {
+// Build a sequenceMessage carrying an identifying id so tests can assert ordering/identity.
+sequencer::sequenceMessage msg(uint64_t id) {
+    sequencer::sequenceMessage m{};
+    m.id = id;
+    return m;
+}
+} // namespace
+
 // Test basic write and read operations
 TEST(BusTest, BasicWriteRead) {
-    Bus<int> bus(10);
-    std::atomic<Bus<int>::cursor_type> cursor(0);
+    Bus bus(10);
+    std::atomic<Bus::cursor_type> cursor(0);
     bus.registerCursor(cursor);
 
     // Write a value
-    EXPECT_TRUE(bus.write(42));
+    EXPECT_TRUE(bus.write(msg(42)));
 
     // Read it back
-    int value;
+    sequencer::sequenceMessage value{};
     EXPECT_TRUE(bus.read(cursor, value));
-    EXPECT_EQ(value, 42);
-    EXPECT_EQ(cursor.load(), 1);
+    EXPECT_EQ(value.id, 42u);
+    EXPECT_EQ(cursor.load(), 1u);
 }
 
 // Test multiple writes and reads in sequence
 TEST(BusTest, SequentialWriteRead) {
-    Bus<int> bus(10);
-    std::atomic<Bus<int>::cursor_type> cursor(0);
+    Bus bus(10);
+    std::atomic<Bus::cursor_type> cursor(0);
     bus.registerCursor(cursor);
 
     // Write multiple values
     for (int i = 0; i < 5; ++i) {
-        EXPECT_TRUE(bus.write(i * 10));
+        EXPECT_TRUE(bus.write(msg(i * 10)));
     }
 
     // Read them back
     for (int i = 0; i < 5; ++i) {
-        int value;
+        sequencer::sequenceMessage value{};
         EXPECT_TRUE(bus.read(cursor, value));
-        EXPECT_EQ(value, i * 10);
+        EXPECT_EQ(value.id, static_cast<uint64_t>(i * 10));
     }
 }
 
 // Test that read returns false when cursor is at or ahead of write pointer
 TEST(BusTest, ReadEmptyBuffer) {
-    Bus<int> bus(10);
-    std::atomic<Bus<int>::cursor_type> cursor(0);
+    Bus bus(10);
+    std::atomic<Bus::cursor_type> cursor(0);
     bus.registerCursor(cursor);
 
-    int value;
+    sequencer::sequenceMessage value{};
     EXPECT_FALSE(bus.read(cursor, value));
 }
 
 // Test circular wrap-around behavior with proper cursor management
 TEST(BusTest, WrapAroundWrite) {
-    Bus<int> bus(4); // Small size to force wrap-around
-    std::atomic<Bus<int>::cursor_type> cursor(0);
+    Bus bus(4); // Small size to force wrap-around
+    std::atomic<Bus::cursor_type> cursor(0);
     bus.registerCursor(cursor);
 
     // Write exactly capacity
     for (int i = 0; i < 4; ++i) {
-        EXPECT_TRUE(bus.write(i));
+        EXPECT_TRUE(bus.write(msg(i)));
     }
 
     // Read them all
     for (int i = 0; i < 4; ++i) {
-        int value;
+        sequencer::sequenceMessage value{};
         EXPECT_TRUE(bus.read(cursor, value));
-        EXPECT_EQ(value, i);
+        EXPECT_EQ(value.id, static_cast<uint64_t>(i));
     }
 
     // Now we can write more (cursor advanced)
     for (int i = 4; i < 8; ++i) {
-        EXPECT_TRUE(bus.write(i));
+        EXPECT_TRUE(bus.write(msg(i)));
     }
 
     // Read the new ones
     for (int i = 4; i < 8; ++i) {
-        int value;
+        sequencer::sequenceMessage value{};
         EXPECT_TRUE(bus.read(cursor, value));
-        EXPECT_EQ(value, i);
+        EXPECT_EQ(value.id, static_cast<uint64_t>(i));
     }
 }
 
 // Test multiple readers with different cursors
 TEST(BusTest, MultipleReaders) {
-    Bus<int> bus(10);
-    std::atomic<Bus<int>::cursor_type> cursor1(0);
-    std::atomic<Bus<int>::cursor_type> cursor2(0);
+    Bus bus(10);
+    std::atomic<Bus::cursor_type> cursor1(0);
+    std::atomic<Bus::cursor_type> cursor2(0);
 
     bus.registerCursor(cursor1);
     bus.registerCursor(cursor2);
 
     // Write some values
     for (int i = 0; i < 5; ++i) {
-        EXPECT_TRUE(bus.write(i));
+        EXPECT_TRUE(bus.write(msg(i)));
     }
 
     // Reader 1 reads first 3 values
     for (int i = 0; i < 3; ++i) {
-        int value;
+        sequencer::sequenceMessage value{};
         EXPECT_TRUE(bus.read(cursor1, value));
-        EXPECT_EQ(value, i);
+        EXPECT_EQ(value.id, static_cast<uint64_t>(i));
     }
 
     // Reader 2 reads all 5 values
     for (int i = 0; i < 5; ++i) {
-        int value;
+        sequencer::sequenceMessage value{};
         EXPECT_TRUE(bus.read(cursor2, value));
-        EXPECT_EQ(value, i);
+        EXPECT_EQ(value.id, static_cast<uint64_t>(i));
     }
 
     // Cursors should be at different positions
-    EXPECT_EQ(cursor1.load(), 3);
-    EXPECT_EQ(cursor2.load(), 5);
+    EXPECT_EQ(cursor1.load(), 3u);
+    EXPECT_EQ(cursor2.load(), 5u);
 }
 
 // Test that writer waits for slowest reader before overwriting
 TEST(BusTest, OverwriteProtection) {
-    Bus<int> bus(5); // Very small buffer
-    std::atomic<Bus<int>::cursor_type> cursor1(0);
-    std::atomic<Bus<int>::cursor_type> cursor2(0);
+    Bus bus(5); // Very small buffer
+    std::atomic<Bus::cursor_type> cursor1(0);
+    std::atomic<Bus::cursor_type> cursor2(0);
 
     bus.registerCursor(cursor1);
     bus.registerCursor(cursor2);
 
     // Write up to capacity
     for (int i = 0; i < 5; ++i) {
-        EXPECT_TRUE(bus.write(i));
+        EXPECT_TRUE(bus.write(msg(i)));
     }
 
     // Reader 1 advances
-    int value;
+    sequencer::sequenceMessage value{};
     bus.read(cursor1, value);
     bus.read(cursor1, value);
     // cursor1 is now at 2, but cursor2 is at 0
@@ -138,7 +147,7 @@ TEST(BusTest, OverwriteProtection) {
     // Attempt to write more - should fail because cursor2 hasn't advanced
     // and buffer would overwrite data it hasn't read
     for (int i = 5; i < 7; ++i) {
-        EXPECT_FALSE(bus.write(i));
+        EXPECT_FALSE(bus.write(msg(i)));
     }
 
     // Reader 2 advances - now writes should succeed
@@ -147,52 +156,46 @@ TEST(BusTest, OverwriteProtection) {
     }
 
     // Now we can write again (cursor2 caught up)
-    EXPECT_TRUE(bus.write(100));
+    EXPECT_TRUE(bus.write(msg(100)));
 }
 
-// Test with complex data type
+// Test with all fields of the message populated
 TEST(BusTest, ComplexDataType) {
-    struct Message {
-        uint64_t id;
-        int value;
-        char data[16];
-    };
-
-    Bus<Message> bus(10);
-    std::atomic<Bus<Message>::cursor_type> cursor(0);
+    Bus bus(10);
+    std::atomic<Bus::cursor_type> cursor(0);
     bus.registerCursor(cursor);
 
-    Message msg{};
-    msg.id = 12345;
-    msg.value = 999;
-    strcpy(msg.data, "hello");
+    sequencer::sequenceMessage m{};
+    m.id = 12345;
+    m.price = 999;
+    strcpy(m.symbol, "hello");
 
-    EXPECT_TRUE(bus.write(msg));
+    EXPECT_TRUE(bus.write(m));
 
-    Message read_msg;
+    sequencer::sequenceMessage read_msg{};
     EXPECT_TRUE(bus.read(cursor, read_msg));
-    EXPECT_EQ(read_msg.id, 12345);
-    EXPECT_EQ(read_msg.value, 999);
-    EXPECT_STREQ(read_msg.data, "hello");
+    EXPECT_EQ(read_msg.id, 12345u);
+    EXPECT_EQ(read_msg.price, 999u);
+    EXPECT_STREQ(read_msg.symbol, "hello");
 }
 
 // Test that flow control prevents writers when readers fall behind
 TEST(BusTest, StaleCursorRejection) {
-    Bus<int> bus(5);
-    std::atomic<Bus<int>::cursor_type> slow_cursor(0);
+    Bus bus(5);
+    std::atomic<Bus::cursor_type> slow_cursor(0);
 
     bus.registerCursor(slow_cursor);
 
     // Fill the buffer to capacity
     for (int i = 0; i < 5; ++i) {
-        EXPECT_TRUE(bus.write(i)) << "Failed to write item " << i;
+        EXPECT_TRUE(bus.write(msg(i))) << "Failed to write item " << i;
     }
 
     // Try to write more - should fail because slow_cursor hasn't advanced
     // and buffer is full
     bool write_blocked = false;
     for (int i = 5; i < 10; ++i) {
-        if (!bus.write(i)) {
+        if (!bus.write(msg(i))) {
             write_blocked = true;
             break;
         }
@@ -200,15 +203,15 @@ TEST(BusTest, StaleCursorRejection) {
     EXPECT_TRUE(write_blocked) << "Expected writes to be blocked, but they weren't";
 
     // Verify that slow_cursor can still read what's in the buffer
-    int value;
+    sequencer::sequenceMessage value{};
     EXPECT_TRUE(bus.read(slow_cursor, value));
-    EXPECT_EQ(value, 0);
+    EXPECT_EQ(value.id, 0u);
 }
 
 // Test concurrent write and read
 TEST(BusTest, ConcurrentReadWrite) {
-    Bus<int> bus(100);
-    std::atomic<Bus<int>::cursor_type> cursor(0);
+    Bus bus(100);
+    std::atomic<Bus::cursor_type> cursor(0);
     bus.registerCursor(cursor);
 
     std::atomic<bool> stop_writing{false};
@@ -218,7 +221,7 @@ TEST(BusTest, ConcurrentReadWrite) {
     // Writer thread
     std::thread writer([&]() {
         for (int i = 0; i < 1000; ++i) {
-            while (!bus.write(i)) {
+            while (!bus.write(msg(i))) {
                 std::this_thread::yield();
             }
             write_count.fetch_add(1);
@@ -229,7 +232,7 @@ TEST(BusTest, ConcurrentReadWrite) {
     // Reader thread
     std::thread reader([&]() {
         while (!stop_writing.load() || cursor.load() < 1000) {
-            int value;
+            sequencer::sequenceMessage value{};
             if (bus.read(cursor, value)) {
                 read_count.fetch_add(1);
             } else {
@@ -247,85 +250,89 @@ TEST(BusTest, ConcurrentReadWrite) {
 
 // Test capacity query
 TEST(BusTest, CapacityQuery) {
-    Bus<int> bus(256);
-    EXPECT_EQ(bus.capacity(), 256);
+    Bus bus(256);
+    EXPECT_EQ(bus.capacity(), 256u);
 }
 
 // Test that zero-size bus throws
-TEST(BusTest, ZeroSizeThrows) { EXPECT_THROW(Bus<int> bus(0), std::invalid_argument); }
+TEST(BusTest, ZeroSizeThrows) { EXPECT_THROW(Bus bus(0), std::invalid_argument); }
 
 // Test with move semantics
 TEST(BusTest, MoveSemantics) {
-    Bus<std::string> bus(10);
-    std::atomic<Bus<std::string>::cursor_type> cursor(0);
+    Bus bus(10);
+    std::atomic<Bus::cursor_type> cursor(0);
     bus.registerCursor(cursor);
 
-    std::string msg = "hello world";
-    EXPECT_TRUE(bus.write(std::move(msg)));
+    sequencer::sequenceMessage m{};
+    m.id = 7;
+    strcpy(m.symbol, "AAPL");
+    EXPECT_TRUE(bus.write(std::move(m)));
 
-    std::string read_msg;
+    sequencer::sequenceMessage read_msg{};
     EXPECT_TRUE(bus.read(cursor, read_msg));
-    EXPECT_EQ(read_msg, "hello world");
+    EXPECT_EQ(read_msg.id, 7u);
+    EXPECT_STREQ(read_msg.symbol, "AAPL");
 }
 
 // Test general behavior with multiple cursors
 TEST(BusTest, generalTest) {
-    Bus<std::string> bus(10);
+    Bus bus(10);
 
-    std::atomic<Bus<std::string>::cursor_type> cursor1(0);
-    std::atomic<Bus<std::string>::cursor_type> cursor2(0);
-    std::atomic<Bus<std::string>::cursor_type> cursor3(0);
+    std::atomic<Bus::cursor_type> cursor1(0);
+    std::atomic<Bus::cursor_type> cursor2(0);
+    std::atomic<Bus::cursor_type> cursor3(0);
 
     bus.registerCursor(cursor1);
     bus.registerCursor(cursor2);
     bus.registerCursor(cursor3);
 
     bool check = false;
-    std::string buf;
+    sequencer::sequenceMessage buf{};
 
     check = bus.read(cursor1, buf);
     EXPECT_FALSE(check);
 
+    // ids 0..9 stand in for "msg0".."msg9"
     for (int i = 0; i < 10; ++i) {
-        check = bus.write("msg" + std::to_string(i));
+        check = bus.write(msg(i));
         EXPECT_TRUE(check);
     }
 
-    check = bus.write("overflow");
+    check = bus.write(msg(999)); // overflow
     EXPECT_FALSE(check);
 
     bus.read(cursor1, buf);
-    EXPECT_EQ(buf, "msg0");
+    EXPECT_EQ(buf.id, 0u);
     bus.read(cursor2, buf);
-    EXPECT_EQ(buf, "msg0");
+    EXPECT_EQ(buf.id, 0u);
     bus.read(cursor3, buf);
-    EXPECT_EQ(buf, "msg0");
+    EXPECT_EQ(buf.id, 0u);
 
-    check = bus.write("wrap0");
+    check = bus.write(msg(10)); // "wrap0"
     EXPECT_TRUE(check);
 
     for (int i = 0; i < 9; ++i) {
         bus.read(cursor1, buf);
-        EXPECT_EQ(buf, "msg" + std::to_string(i + 1));
+        EXPECT_EQ(buf.id, static_cast<uint64_t>(i + 1));
         bus.read(cursor2, buf);
-        EXPECT_EQ(buf, "msg" + std::to_string(i + 1));
+        EXPECT_EQ(buf.id, static_cast<uint64_t>(i + 1));
         bus.read(cursor3, buf);
-        EXPECT_EQ(buf, "msg" + std::to_string(i + 1));
+        EXPECT_EQ(buf.id, static_cast<uint64_t>(i + 1));
     }
 
-    check = bus.write("wrap1");
+    check = bus.write(msg(11)); // "wrap1"
     EXPECT_TRUE(check);
     bus.read(cursor2, buf);
-    EXPECT_EQ(buf, "wrap0");
+    EXPECT_EQ(buf.id, 10u); // "wrap0"
     bus.read(cursor3, buf);
-    EXPECT_EQ(buf, "wrap0");
+    EXPECT_EQ(buf.id, 10u);
 
     for (int i = 0; i < 8; i++) {
-        check = bus.write("wrap" + std::to_string(i + 2));
+        check = bus.write(msg(12 + i)); // "wrap2".."wrap9"
         EXPECT_TRUE(check);
     }
 
-    check = bus.write("bad");
+    check = bus.write(msg(9999)); // "bad"
     EXPECT_FALSE(check);
     EXPECT_EQ(bus.getMinCursor(), 10);
 }

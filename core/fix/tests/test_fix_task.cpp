@@ -11,7 +11,7 @@ TEST(FixTaskTest, FromAppPushesToQueue) {
     std::vector<exchange::core::SharedQueue<sequenceMessage> *> sequencer_queues;
     sequencer_queues.push_back(&seq_q);
 
-    exchange::core::Bus<sequenceMessage> bus(8);
+    exchange::core::Bus bus(8);
 
     FixTask fix_task(sequencer_queues, bus);
 
