@@ -10,7 +10,7 @@
 #include <vector>
 #include <fstream>
 
-#include "../../../sequencer/include/sequencer.hpp"
+#include "../../../sequencer/include/sequence_message.hpp"
 
 namespace exchange::core {
 
@@ -43,6 +43,14 @@ class Bus {
         const cursor_type current_cursor = cursor.load(std::memory_order_acquire);
         const cursor_type next_write = total_writes_.load(std::memory_order_acquire);
 
+        if (next_write - size_ > current_cursor) {
+            // check how many times we wrote over 
+            std::uint64_t times_overwritten{(next_write - current_cursor) / size_};
+
+            std::uint64_t lines{times_overwritten * size_};
+
+        }
+
         if (current_cursor >= next_write) {
             return false;
         }
@@ -71,7 +79,7 @@ class Bus {
      * recomputation on every write, but will recompute if the next write would exceed the
      * cached minimum + size.
      */
-    template <typename U> bool writeImpl(U &&value) {
+        bool writeImpl(const sequencer::sequenceMessage &message) {
         const cursor_type current_write = total_writes_.load(std::memory_order_relaxed);
 
         if (!reader_cursors_.empty()) {
@@ -86,9 +94,9 @@ class Bus {
             }
         }
 
-        buffer_[static_cast<std::size_t>(current_write % size_)] = std::forward<U>(value);
+        buffer_[static_cast<std::size_t>(current_write % size_)] = message;
         total_writes_.store(current_write + 1, std::memory_order_release);
-        // Store in the journal with format: Write #[number here]: # write message as json
+        journalFile << "Write #" << total_writes_.load(std::memory_order_acquire) << ": " << message.toJson() << "\n";
         return true;
     }
 

@@ -9,53 +9,13 @@
 #include <utility>
 
 #include "../../core/task/include/task.hpp"
+#include "sequence_message.hpp"
 
 namespace exchange {
 namespace sequencer {
 
 #define ANY_TICKER ""
 #define MAX_CLIENT_PORTS 65536
-
-enum class orderType : uint8_t {
-    BUY = 1,
-    SELL = 2,
-    CANCEL = 3,
-    CANCELREJ = 4,
-};
-
-/*
-Message format transmitted to the matching engine
-
-id: client-generated unique ID assigned to order
-globalSequenceNumber: unique ID assigned by the sequencer for each ticker globally
-topicSequenceNumber: unique ID assigned by the sequencer for each ticker and client port combination
-timestamp: timestamp of the order, nanoseconds since epoch
-order: Order assigned by received by the server
-port: port of the client
-price: price of the order
-quantity: quantity of the order
-symbol: symbol of the order
-type: type of the order
-expiry: expiry time of the order
-shard_id: shard ID assigned by the sequencer for the order
-tif: time in force of the order
-*/
-struct sequenceMessage {
-    uint64_t id;
-    uint64_t globalSequenceNumber;
-    uint64_t topicSequenceNumber;
-    uint64_t timestamp;
-    uint64_t order;
-    uint64_t port;
-    uint64_t topic;
-    uint64_t price;
-    uint64_t quantity;
-    char symbol[10];
-    orderType type;
-    std::chrono::system_clock::time_point expiry;
-    uint8_t shard_id;
-    core::task::TimeInForce tif;
-};
 
 /*
 globalSequenceNumber: sequence number for each ticker globally across all clients
