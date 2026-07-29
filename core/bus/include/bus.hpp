@@ -4,8 +4,11 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 #include <fstream>
@@ -39,7 +42,12 @@ class Bus {
 
     bool write(sequencer::sequenceMessage &&value) { return writeImpl(std::move(value)); }
 
-    bool read(std::atomic<cursor_type> &cursor, sequencer::sequenceMessage &output) const {
+    void cleanJournal() {
+
+    }
+
+    // Read from the index of the cursor first
+    bool read(std::atomic<cursor_type> &cursor, sequencer::sequenceMessage *output) {
         const cursor_type current_cursor = cursor.load(std::memory_order_acquire);
         const cursor_type next_write = total_writes_.load(std::memory_order_acquire);
 
@@ -47,11 +55,22 @@ class Bus {
             // check how many times we wrote over 
             std::uint64_t times_overwritten{(next_write - current_cursor) / size_};
 
-            std::uint64_t lines{times_overwritten * size_};
+            std::uint64_t lines_to_read{times_overwritten * size_ + 1};
+            output = new sequencer::sequenceMessage(times_overwritten);
 
-        }
+            for (int i{0}; i < lines_to_read; ++i) {
+                std::string log;
+                std::getline(journalFile, log);
 
-        if (current_cursor >= next_write) {
+                std::istringstream log_stream{log};
+
+                log_stream.ignore(std::numeric_limits<std::streamsize>::max(), ':');
+                log = log_stream.str();
+
+                output[i] = sequencer::sequenceMessage::jsonToSequenceMessage(log);
+            }
+
+            cursor.store(next_write + 1, std::memory_order_release);
             return false;
         }
 
@@ -61,12 +80,12 @@ class Bus {
         }
 
         const std::size_t index = static_cast<std::size_t>(current_cursor % size_);
-        const std::optional<sequencer::sequenceMessage> &slot = buffer_[index];
-        if (!slot.has_value()) {
+        std::optional<sequencer::sequenceMessage>* slot = &buffer_[index];
+        if (!slot->has_value()) {
             return false;
         }
 
-        output = *slot;
+        output = &slot->value();
         cursor.store(current_cursor + 1, std::memory_order_release);
         return true;
     }

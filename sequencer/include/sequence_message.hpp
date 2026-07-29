@@ -1,14 +1,65 @@
 #pragma once
 
+#include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include "../../core/task/include/time_in_force.hpp"
 
 namespace exchange {
 namespace sequencer {
+
+namespace detail {
+
+// Returns the raw JSON value for `key` (numeric token or unquoted string contents).
+inline std::string_view jsonValue(std::string_view json, std::string_view key) {
+    const std::string needle = std::string("\"") + std::string(key) + "\":";
+    const std::size_t pos = json.find(needle);
+    if (pos == std::string_view::npos) {
+        throw std::invalid_argument("Missing JSON key: " + std::string(key));
+    }
+
+    std::size_t index = pos + needle.size();
+    while (index < json.size() && std::isspace(static_cast<unsigned char>(json[index]))) {
+        ++index;
+    }
+    if (index >= json.size()) {
+        throw std::invalid_argument("Missing value for key: " + std::string(key));
+    }
+
+    if (json[index] == '"') {
+        ++index;
+        const std::size_t start = index;
+        while (index < json.size() && json[index] != '"') {
+            ++index;
+        }
+        if (index >= json.size()) {
+            throw std::invalid_argument("Unterminated string for key: " + std::string(key));
+        }
+        return json.substr(start, index - start);
+    }
+
+    const std::size_t start = index;
+    while (index < json.size() && json[index] != ',' && json[index] != '}') {
+        ++index;
+    }
+    std::string_view value = json.substr(start, index - start);
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) {
+        value.remove_suffix(1);
+    }
+    if (value.empty()) {
+        throw std::invalid_argument("Empty value for key: " + std::string(key));
+    }
+    return value;
+}
+
+} // namespace detail
 
 enum class orderType : uint8_t {
     BUY = 1,
@@ -84,6 +135,52 @@ struct sequenceMessage {
         json += "\"";
         json += '}';
         return json;
+    }
+
+    static sequenceMessage jsonToSequenceMessage(std::string loggesMesssage) {
+        const std::size_t brace = loggesMesssage.find('{');
+        if (brace == std::string::npos) {
+            throw std::invalid_argument("JSON object not found in logged message");
+        }
+        const std::string_view json = loggesMesssage;
+        const std::string_view payload = json.substr(brace);
+
+        auto u64 = [&](std::string_view key) {
+            return std::stoull(std::string(detail::jsonValue(payload, key)));
+        };
+
+        sequenceMessage message{};
+        message.id = u64("id");
+        message.globalSequenceNumber = u64("globalSequenceNumber");
+        message.topicSequenceNumber = u64("topicSequenceNumber");
+        message.timestamp = u64("timestamp");
+        message.order = u64("order");
+        message.port = u64("port");
+        message.topic = u64("topic");
+        message.price = u64("price");
+        message.quantity = u64("quantity");
+
+        const std::string symbol = std::string(detail::jsonValue(payload, "symbol"));
+        std::memset(message.symbol, 0, sizeof(message.symbol));
+        std::memcpy(message.symbol, symbol.data(),
+                    std::min(symbol.size(), sizeof(message.symbol) - 1));
+
+        message.type = static_cast<orderType>(u64("type"));
+
+        const int64_t expiryNs =
+            std::stoll(std::string(detail::jsonValue(payload, "expiry")));
+        message.expiry = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            std::chrono::system_clock::time_point{} + std::chrono::nanoseconds(expiryNs));
+
+        message.shard_id = static_cast<uint8_t>(u64("shardId"));
+
+        const std::string_view tif = detail::jsonValue(payload, "tif");
+        if (tif.empty()) {
+            throw std::invalid_argument("Empty tif value");
+        }
+        message.tif = static_cast<core::task::TimeInForce>(tif.front());
+
+        return message;
     }
 };
 
