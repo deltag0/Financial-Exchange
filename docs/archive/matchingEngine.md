@@ -1,3 +1,6 @@
+> **Historical note:** This file is preserved for background only. It is not authoritative and may
+> contradict `../exchange-rules.md`, `../architecture.md`, or `../implementation-status.md`.
+
 After matching orders, the matching engine will need to do some additional tasks.
 
 The first additional task is to update the internal order book. The order book is a data structure that stores the orders that are waiting to be processed by the matching engine. The order book is a binary search tree that is ordered by the price of the orders.
