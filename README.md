@@ -1,67 +1,64 @@
 # Exchange — Overview
 
-This repository contains a performant, containerized exchange platform designed for experimenting with high-throughput order sequencing, IPC-based components, and observability. It combines a C++ sequencer and core IPC library with a lightweight Node.js API, and an OpenTelemetry → Prometheus metrics pipeline.
+This repository contains a containerized financial exchange platform designed for deterministic,
+multi-instrument order processing. It combines a C++20 exchange core with FIX connectivity, order
+sequencing, instrument-partitioned matching engines, durable recovery, a Node.js API, a web
+interface, and an OpenTelemetry and Prometheus observability pipeline.
 
 ## Components
 
-- **Sequencer (C++)** — assigns monotonic sequence numbers to incoming orders and exposes IPC queues for downstream consumers. See [sequencer](sequencer/).
-- **Core IPC library (C++)** — header-only `SharedQueue` utilities used by the sequencer and other processes. See [core](core/).
-- **Backend API (Node.js)** — REST surface for clients, validating requests and forwarding messages to the sequencer. See [backend](backend/).
-- **Engine (placeholder)** — intended matching engine component; currently not implemented. See [engine](engine/).
-- **Frontend (placeholder)** — Dockerfile + Nginx template for a future UI. See [frontend](frontend/).
-- **Observability** — OpenTelemetry Collector configuration and Prometheus scraping for metrics. See [otel/config.yaml](otel/config.yaml) and [prometheus/prometheus.yml](prometheus/prometheus.yml).
+- **FIX gateway (C++)** — manages FIX sessions, validates protocol messages, and translates client
+  requests into normalized exchange commands. See [core/fix](core/fix/).
+- **Sequencer and journal (C++)** — establishes an authoritative order for accepted commands,
+  records them durably, and routes them to the correct instrument partition. See
+  [sequencer](sequencer/).
+- **Matching engine (C++)** — maintains price-time-priority order books and deterministically
+  processes orders for each instrument. See [matching_engine](matching_engine/).
+- **Core libraries (C++)** — provide bounded queues, event distribution, task abstractions, and
+  exchange component wiring. See [core](core/).
+- **Backend API (Node.js)** — exposes client-facing HTTP endpoints and connects external
+  applications to exchange services. See [backend](backend/).
+- **Frontend** — provides a web interface for exchange data and services. See [frontend](frontend/).
+- **Recovery and replay** — restores order books and exchange state from journals and snapshots
+  while preserving deterministic processing results.
+- **Observability** — exports operational metrics through OpenTelemetry for collection and
+  Prometheus monitoring. See [otel/config.yaml](otel/config.yaml) and
+  [prometheus/prometheus.yml](prometheus/prometheus.yml).
 
 ## Tech Stack
 
-- C++20, Boost.Interprocess (IPC)
-- Node.js (CommonJS) for the API
-- CMake for native builds
-- Docker & Docker Compose for local stacks
-- OpenTelemetry Collector (OTLP) and Prometheus for metrics
-- Google Test / Node test runner / pytest for testing
+- C++20, Boost, and QuickFIX
+- Node.js using CommonJS
+- CMake and Google Test
+- Python and pytest
+- Docker and Docker Compose
+- OpenTelemetry Collector and Prometheus
 
-## Running (Docker Compose)
+## Build
 
-Prerequisites: Docker and Docker Compose.
-
-```bash
-# Build and start all services
-docker-compose up --build
-
-# Stop services
-docker-compose down
-```
-
-When running locally via Docker:
-- Backend API: http://localhost:5000
-- Prometheus UI: http://localhost:9090
-
-## Native C++ Build (sequencer)
-
-Requires a C++20 compiler, CMake 3.20+, and Boost 1.71+.
+Native builds require a C++20 compiler, CMake 3.20+, Boost 1.71+, QuickFIX, and Google Test.
 
 ```bash
 cmake -B build -S .
-cmake --build build --target sequencer_app
+cmake --build build --parallel
 ```
 
-## API Conventions
+## Test
 
-The backend follows strict API conventions for order messages (JSON, integer fixed-point for amounts, validation rules, and specific HTTP status codes). See `.claude/rules/api-conventions.md` for full details.
+```bash
+ctest --test-dir build --output-on-failure
+```
 
-## Observability
+The services are orchestrated with Docker Compose:
 
-All HTTP routes and critical operations emit OTel metrics (counters and histograms) and push to the collector at `http://otel:4318`. The collector is configured to expose a Prometheus-compatible metrics endpoint.
+```bash
+docker-compose up --build
+docker-compose down
+```
 
-## Testing
+## Documentation
 
-- C++ unit tests use Google Test (see `sequencer/tests` and `core/tests`).
-- Backend tests use the Node.js built-in test runner (`backend/tests`).
-- Integration tests and simple Python clients for the sequencer live in `sequencer/tests`.
-
-## Useful files
-
-- [backend/index.js](backend/index.js) — Node HTTP entrypoint
-- [sequencer/include/sequencer.hpp](sequencer/include/sequencer.hpp) — sequencer API
-- [otel/config.yaml](otel/config.yaml) — OTel Collector config
----
+- [Exchange Rules](docs/exchange-rules.md) — order handling and matching behavior
+- [Architecture](docs/architecture.md) — component responsibilities, ownership, and data flow
+- [Implementation Status](docs/implementation-status.md) — implementation and test coverage record
+- [Contributor and Agent Guidance](AGENTS.md) — required working and documentation practices

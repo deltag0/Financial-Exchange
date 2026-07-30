@@ -1,5 +1,9 @@
 # Code Style
 
+Follow `AGENTS.md` and the authoritative project documents it identifies. This file contains only
+language and formatting guidance; it does not define exchange behavior, architecture, or current
+implementation status.
+
 ## C++ (sequencer, core, engine)
 
 - **Standard:** C++20. Use modern features (concepts, ranges, `std::span`) where they clarify intent.
@@ -14,7 +18,8 @@
   - Functions and variables: `camelCase`
   - Constants and enumerators: `UPPER_SNAKE_CASE`
   - Private members: `trailingUnderscore_`
-- **Comments:** Write comments that explain *why*, not *what*. The IPC and shared-memory code is non-obvious — comment locking semantics and queue ownership.
+- **Comments:** Write comments that explain *why*, not *what*. Concurrency and queue ownership are
+  non-obvious — document ownership, lifetime, and synchronization assumptions.
 - **Error handling:** Use return codes or `std::expected` for recoverable errors. `assert` only for invariants that can never fail in correct code. No exceptions in hot paths (order processing).
 
 ## Node.js (backend)

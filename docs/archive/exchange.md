@@ -1,7 +1,10 @@
+> **Historical note:** This file is preserved for background only. It is not authoritative and may
+> contradict `../exchange-rules.md`, `../architecture.md`, or `../implementation-status.md`.
+
 Currently there will be threads for:
 - QuickFIX receiving FIX messages
 - FIX ports handling messages
-- Sequencer 
+- Sequencer
 - Matching engine
 
 Each port has private shared queues:
