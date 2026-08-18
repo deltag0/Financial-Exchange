@@ -12,8 +12,7 @@ is defined only by adopted rules in [Exchange Rules](exchange-rules.md).
 
 ## Scope and constraints
 
-The system is intended to be understandable and runnable by two university students on ordinary
-laptops. It should develop toward:
+The system is intended to be understandable and runnable by engineers on ordinary laptops. It should develop toward:
 
 - multiple instruments;
 - deterministic and fair command processing;
@@ -32,7 +31,9 @@ event, ownership, and recovery contracts.
 ## Architectural principles
 
 - One logical owner mutates an instrument's order book at a time.
-- Commands affecting the same instrument enter one authoritative deterministic order.
+- The sequencer assigns commands one authoritative global command sequence.
+- Each state-owning partition processes its commands in increasing global sequence order and
+  completes one command before beginning its next command.
 - External protocols are translated into normalized internal commands before business processing.
 - Matching behavior does not depend on a gateway protocol, wall-clock tie-breaking, or thread
   scheduling.
@@ -56,7 +57,16 @@ Gateway and session adapter
 Normalization and stateless validation
   |
   v
-Sequencing and journal boundary
+Authoritative command admission and retransmission
+  |
+  v
+Global sequence assignment
+  |
+  v
+Append immutable normalized command
+  |
+  v
+Durable synchronization
   |
   v
 Instrument partition
@@ -72,10 +82,14 @@ Private client events       Public market data
   |                         |
   v                         v
 Gateway adapter             Market-data publisher
+  |
+  v
+Business-result acknowledgement
 ```
 
 Commands never travel backward through this path. Results are represented as events rather than by
-mutating and returning the original command.
+mutating and returning the original command. The journal is authoritative for recovery; replay sends
+its commands through the same matching path to regenerate events.
 
 ## Components
 
@@ -91,6 +105,7 @@ events into protocol-specific responses.
 - network connection and session lifecycle;
 - protocol framing and parsing;
 - authentication or session-to-client association;
+- association of each transport session with a stable `ClientId` that survives reconnects;
 - protocol-level validation;
 - lossless conversion to and from internal command/event representations;
 - delivery state needed by the protocol.
@@ -98,6 +113,7 @@ events into protocol-specific responses.
 #### Does not own
 
 - authoritative command ordering;
+- authoritative logical-command deduplication;
 - order books;
 - matching decisions;
 - trade formation;
@@ -118,16 +134,49 @@ order type, TimeInForce, and any required ownership information.
 - stateless required-field checks;
 - exact external-to-internal numeric conversion;
 - supported protocol-value mapping;
+- external-symbol resolution to a stable `InstrumentId`;
+- versioned instrument-configuration lookup;
+- tick-size and lot-size validation;
 - rejection of malformed or lossy representations.
 
 #### Does not own
 
 - state-dependent order existence checks;
 - active-ID uniqueness decisions that require exchange state;
+- matching-state ownership and cancellation checks;
 - matching;
 - sequencing policy.
 
 The adopted rules determine which validation results must be sequenced for deterministic replay.
+
+### Command admission and retransmission
+
+#### Purpose
+
+Enforce logical command uniqueness across every gateway before a new global sequence is assigned.
+
+#### Owns
+
+- the authoritative `(ClientId, ClientCommandId)` admission index;
+- atomic first-submission reservation across concurrent gateways;
+- comparison of retransmissions with the original normalized command;
+- coalescing or waiting while an identical original command is still in flight;
+- returning the original result for an identical completed command;
+- rejecting conflicting reuse before sequencing;
+- reconstruction of the admission index from the command journal during recovery.
+
+#### Does not own
+
+- protocol parsing or session state;
+- global command sequence assignment;
+- matching or order-book mutation;
+- creation of new business events for a retransmission;
+- independent durable state that cannot be reconstructed from the authoritative journal.
+
+This boundary may initially be an in-process object adjacent to the sequencer. It is logically shared
+by all gateways and must not be implemented as unrelated gateway-local caches. If a process fails
+before an admitted command becomes journal-durable, losing that in-flight reservation is safe because
+the business action was not committed.
 
 ### Sequencer
 
@@ -151,8 +200,9 @@ Establish the authoritative processing position for commands that can affect the
 - client response formatting;
 - market-data formatting.
 
-The exact sequence scope—global, per partition, or per instrument—is an exchange-rule decision. The
-architecture requires only that commands affecting one instrument have one unambiguous order.
+The sequence scope is global. Partitions may process independent instruments concurrently, but each
+partition observes the global positions assigned to its commands and cannot introduce a different
+priority order.
 
 ### Journal
 
@@ -175,8 +225,10 @@ Maintain the authoritative durable record required to recover acknowledged excha
 - gateway protocol state;
 - public market-data formatting.
 
-The adopted rules determine whether commands, events, or both are authoritative and when a client may
-receive an acceptance acknowledgement.
+The normalized, sequenced command journal is authoritative. Initially the journal completes one
+`fdatasync`, `fsync`, or platform-equivalent durable synchronization per command before that command
+is processed. Replication is not required. A later group-commit implementation may batch durable
+synchronization without acknowledging any command before its batch is durable.
 
 ### Instrument router and partitions
 
@@ -212,6 +264,8 @@ changes and business events.
 #### Owns
 
 - active order state;
+- an active-order index from `OrderId` to owner, instrument, remaining quantity, and order-book
+  location;
 - per-instrument bid and ask books;
 - price and time priority;
 - fill and trade formation;
@@ -231,6 +285,13 @@ changes and business events.
 The matching engine is a deterministic state machine. Given the same instrument configuration,
 initial state, and sequenced commands, it produces the same final state and ordered business events.
 
+An order enters the active-order index only when positive quantity rests in the book. Full fill and
+successful cancellation remove it from both the book and index as one state transition. A Cancel is
+routed by its `InstrumentId`; the owning partition looks up `TargetOrderId` in this index before
+checking `ClientId`. A missing entry produces `OrderNotActive`. The retransmission index is separate:
+it allows an identical repeated cancel to receive its original result even though the order has since
+left the active-order index.
+
 ### Event stream
 
 #### Purpose
@@ -241,7 +302,7 @@ observability, and recovery consumers.
 #### Owns
 
 - event identity and sequence;
-- ordered publication;
+- ordered publication of one command's events;
 - separation of private and public event classes;
 - consumer gap and retry semantics;
 - backpressure behavior.
@@ -254,7 +315,9 @@ observability, and recovery consumers.
 - market-data aggregation policy.
 
 An event contains enough information to understand the state transition without relying on a mutable
-command object.
+command object. Its stable identity is `(commandSequence, eventIndex)`, where `eventIndex` starts at
+zero for each command. A global publication merge across independent partitions remains an
+exchange-rule decision.
 
 ### Private execution delivery
 
@@ -365,7 +428,9 @@ dependencies across asynchronous boundaries should be avoided.
 ## Sequencing and instrument partitioning
 
 Instrument partitioning enables concurrency without making one order book concurrently writable.
-Commands for independent instruments may run in parallel after the adopted sequencing boundary.
+Commands for independent instruments may run in parallel after global sequencing and durable journal
+append. Each partition processes its assigned commands in increasing global sequence order and
+finishes one command's state transitions and event generation before starting its next command.
 
 Partition selection must be stable for replay and must use a persisted instrument identity rather
 than an implementation-defined hash. Rebalancing or migrating an instrument requires a handoff at a
@@ -377,18 +442,35 @@ must not create an additional scheduler-dependent priority rule.
 ## Commands and events
 
 Normalized commands and business events form stable boundaries between components. They should use
-explicit fixed-width or otherwise well-defined representations for identifiers, price, quantity,
-sequence positions, and versions.
+explicit fixed-width or otherwise well-defined representations for identifiers, integer price ticks,
+integer quantity units, sequence positions, and configuration versions.
+
+In C++, `CommandSequence`, `OrderId`, `ClientId`, and `InstrumentId` are distinct strong types backed
+by `uint64_t`; `EventIndex` is backed by `uint32_t`; and `Price` and `Quantity` are distinct unsigned
+strong types backed by `uint64_t`. Sharing an underlying representation must not make these semantic
+types implicitly interchangeable. `ClientCommandId` is instead a bounded-string strong type and must
+preserve the validated client value without reducing it to a hash. It stores 1 to 64 ASCII bytes and
+uses exact, case-sensitive byte comparison without normalization.
 
 Commands represent requests. Events represent results. A command may produce no state change but must
-still produce the adopted rejection or acknowledgement result. A command that produces several
-trades emits those events in the deterministic order defined by the exchange rules.
+still produce the adopted business result. A command that produces several trades emits those events
+in the deterministic order defined by the exchange rules. Commands are immutable after journaling;
+matching produces separate immutable events rather than mutating the command.
 
 ## Journaling, snapshots, and replay
 
-The journal boundary and acknowledgement rule are selected together. The journal is the local source
-from which acknowledged state can be reconstructed; an external database or cache is not required to
-establish the initial recovery model.
+The normalized, sequenced command journal is the local authoritative source from which committed
+state is reconstructed. An external database, replica, or cache is not required for the initial
+recovery model.
+
+The initial processing path is normalization, authoritative command admission, global sequence
+assignment, immutable command append, durable synchronization, matching, event publication, and
+business-result acknowledgement. If the process fails after durable synchronization but before
+acknowledgement, recovery reprocesses the committed command and regenerates its deterministic events.
+Recovery also reconstructs the mapping from
+`(ClientId, ClientCommandId)` to the normalized command and its original result so retransmission
+cannot execute the business action twice. The command-admission boundary enforces this mapping before
+assigning a new sequence; the exact gateway redelivery mechanism remains an architectural decision.
 
 Snapshots reduce replay time but do not replace the authoritative journal. Each snapshot identifies:
 
@@ -397,8 +479,9 @@ Snapshots reduce replay time but do not replace the authoritative journal. Each 
 - instrument-partition ownership;
 - complete state required to resume deterministic replay.
 
-Recovery loads a valid snapshot, replays later records, verifies invariants, and only then allows new
-commands for the recovered state.
+Recovery loads a valid snapshot, replays later normalized commands through the same matching state
+machine, regenerates their events, verifies invariants, and only then allows new commands for the
+recovered state.
 
 ## Backpressure and failure boundaries
 
