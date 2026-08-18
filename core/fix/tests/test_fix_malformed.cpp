@@ -9,7 +9,7 @@ TEST(FixMalformed, MalformedNumericFieldsThrow) {
     FIX::Message msg;
     msg.getHeader().setField(FIX::MsgType("D"));
     msg.setField(FIX::ClOrdID("MAL1"));
-    msg.setField(FIX::Symbol("MALS"));
+    msg.setField(FIX::Symbol("SPY"));
     msg.setField(FIX::Side(FIX::Side_BUY));
     msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
     // Intentionally set non-numeric OrderQty and Price using StringField
@@ -22,14 +22,14 @@ TEST(FixMalformed, MalformedNumericFieldsThrow) {
 
 TEST(FixMalformed, FixTaskFromAppHandlesMalformed) {
     exchange::core::SharedQueue<sequenceMessage> q(4);
-    std::vector<exchange::core::SharedQueue<sequenceMessage> *> shards{&q};
+    std::vector<exchange::core::SharedQueue<sequenceMessage>*> shards{&q};
     exchange::core::Bus bus(8);
     FixTask fix_task(shards, bus);
 
     FIX::Message msg;
     msg.getHeader().setField(FIX::MsgType("D"));
     msg.setField(FIX::ClOrdID("MAL2"));
-    msg.setField(FIX::Symbol("MALS"));
+    msg.setField(FIX::Symbol("SPY"));
     msg.setField(FIX::Side(FIX::Side_BUY));
     msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
     msg.setField(FIX::StringField(38, "not-a-number"));
@@ -41,7 +41,7 @@ TEST(FixMalformed, FixTaskFromAppHandlesMalformed) {
     EXPECT_FALSE(fix_task.getFixMessageQueue()->pop(out));
 }
 
-TEST(FixMalformed, VeryLongSymbolTruncatesSafely) {
+TEST(FixMalformed, UnknownOverlongSymbolIsRejected) {
     FIX::Message msg;
     msg.getHeader().setField(FIX::MsgType("D"));
     msg.setField(FIX::ClOrdID("LONG1"));
@@ -53,13 +53,10 @@ TEST(FixMalformed, VeryLongSymbolTruncatesSafely) {
     msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
 
     FIX::SessionID sid("FIX.4.4", "S", "T");
-    auto seq = exchange::core::fix::parseFixMessage(msg, sid, 4);
-
-    std::string expect_prefix = longsym.substr(0, 9); // sequenceMessage.symbol holds 9 chars + null
-    EXPECT_EQ(std::string(seq.symbol, 9), expect_prefix);
+    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, 4), exchange::core::fix::FixValidationError);
 }
 
-TEST(FixMalformed, NonAsciiSymbolHandled) {
+TEST(FixMalformed, UnknownNonAsciiSymbolIsRejected) {
     FIX::Message msg;
     msg.getHeader().setField(FIX::MsgType("D"));
     msg.setField(FIX::ClOrdID("UNI1"));
@@ -71,7 +68,5 @@ TEST(FixMalformed, NonAsciiSymbolHandled) {
     msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
 
     FIX::SessionID sid("FIX.4.4", "S", "T");
-    auto seq = exchange::core::fix::parseFixMessage(msg, sid, 2);
-    // Ensure it copied bytes (possibly truncated) and didn't crash
-    EXPECT_NE(std::string(seq.symbol).size(), 0u);
+    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, 2), exchange::core::fix::FixValidationError);
 }

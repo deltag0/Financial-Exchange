@@ -93,6 +93,8 @@ struct sequenceMessage {
     uint64_t order;
     uint64_t port;
     uint64_t topic;
+    uint64_t instrumentId;
+    uint64_t configurationVersion;
     uint64_t price;
     uint64_t quantity;
     char symbol[10];
@@ -110,8 +112,7 @@ struct sequenceMessage {
             ++symbolLen;
         }
 
-        const auto expiryNs =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(expiry.time_since_epoch()).count();
+        const auto expiryNs = std::chrono::duration_cast<std::chrono::nanoseconds>(expiry.time_since_epoch()).count();
 
         std::string json;
         json.reserve(256);
@@ -123,6 +124,8 @@ struct sequenceMessage {
         json += ",\"order\":" + std::to_string(order);
         json += ",\"port\":" + std::to_string(port);
         json += ",\"topic\":" + std::to_string(topic);
+        json += ",\"instrumentId\":" + std::to_string(instrumentId);
+        json += ",\"configurationVersion\":" + std::to_string(configurationVersion);
         json += ",\"price\":" + std::to_string(price);
         json += ",\"quantity\":" + std::to_string(quantity);
         json += ",\"symbol\":\"" + std::string(symbol, symbolLen) + "\"";
@@ -145,9 +148,7 @@ struct sequenceMessage {
         const std::string_view json = loggesMesssage;
         const std::string_view payload = json.substr(brace);
 
-        auto u64 = [&](std::string_view key) {
-            return std::stoull(std::string(detail::jsonValue(payload, key)));
-        };
+        auto u64 = [&](std::string_view key) { return std::stoull(std::string(detail::jsonValue(payload, key))); };
 
         sequenceMessage message{};
         message.id = u64("id");
@@ -157,18 +158,18 @@ struct sequenceMessage {
         message.order = u64("order");
         message.port = u64("port");
         message.topic = u64("topic");
+        message.instrumentId = u64("instrumentId");
+        message.configurationVersion = u64("configurationVersion");
         message.price = u64("price");
         message.quantity = u64("quantity");
 
         const std::string symbol = std::string(detail::jsonValue(payload, "symbol"));
         std::memset(message.symbol, 0, sizeof(message.symbol));
-        std::memcpy(message.symbol, symbol.data(),
-                    std::min(symbol.size(), sizeof(message.symbol) - 1));
+        std::memcpy(message.symbol, symbol.data(), std::min(symbol.size(), sizeof(message.symbol) - 1));
 
         message.type = static_cast<orderType>(u64("type"));
 
-        const int64_t expiryNs =
-            std::stoll(std::string(detail::jsonValue(payload, "expiry")));
+        const int64_t expiryNs = std::stoll(std::string(detail::jsonValue(payload, "expiry")));
         message.expiry = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
             std::chrono::system_clock::time_point{} + std::chrono::nanoseconds(expiryNs));
 

@@ -1,10 +1,15 @@
 #include "../include/fix_parser.hpp"
+#include "instrument_config.hpp"
+
+#include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cmath>
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <limits>
+#include <string_view>
+
 #include <quickfix/Fields.h>
 #include <quickfix/FixFields.h>
 
@@ -17,6 +22,123 @@ namespace {
 
 using exchange::core::task::TimeInForce;
 
+std::uint64_t powerOfTen(const std::uint32_t exponent) {
+    std::uint64_t value = 1;
+    for (std::uint32_t index = 0; index < exponent; ++index) {
+        if (value > std::numeric_limits<std::uint64_t>::max() / 10) {
+            throw std::logic_error("instrument price scale is too large");
+        }
+        value *= 10;
+    }
+    return value;
+}
+
+std::uint64_t parseUnsignedWhole(const std::string_view text, const std::uint64_t maximum,
+                                 const std::string_view fieldName) {
+    if (text.empty()) {
+        throw FixValidationError(std::string(fieldName) + " must not be empty");
+    }
+
+    std::uint64_t value = 0;
+    for (const char character : text) {
+        if (character < '0' || character > '9') {
+            throw FixValidationError(std::string(fieldName) + " must be an unsigned decimal");
+        }
+
+        const std::uint64_t digit = static_cast<std::uint64_t>(character - '0');
+        if (value > maximum / 10 || (value == maximum / 10 && digit > maximum % 10)) {
+            throw FixValidationError(std::string(fieldName) + " exceeds the configured maximum");
+        }
+        value = value * 10 + digit;
+    }
+    return value;
+}
+
+std::uint64_t parsePriceTicks(const std::string_view text, const instrument::InstrumentConfiguration& configuration) {
+    const std::size_t decimalPoint = text.find('.');
+    if (decimalPoint != std::string_view::npos && text.find('.', decimalPoint + 1) != std::string_view::npos) {
+        throw FixValidationError("Price must contain at most one decimal point");
+    }
+
+    const std::string_view wholeText = text.substr(0, decimalPoint);
+    const std::string_view fractionalText =
+        decimalPoint == std::string_view::npos ? std::string_view{} : text.substr(decimalPoint + 1);
+    if (wholeText.empty() || (decimalPoint != std::string_view::npos && fractionalText.empty())) {
+        throw FixValidationError("Price must be a positive decimal");
+    }
+
+    if (configuration.tickSizeMantissa == 0 ||
+        configuration.maxPriceTicks > std::numeric_limits<std::uint64_t>::max() / configuration.tickSizeMantissa) {
+        throw std::logic_error("invalid instrument tick configuration");
+    }
+
+    const std::uint64_t maxScaledPrice = configuration.maxPriceTicks * configuration.tickSizeMantissa;
+    const std::uint64_t scaleFactor = powerOfTen(configuration.priceScale);
+    const std::uint64_t whole = parseUnsignedWhole(wholeText, maxScaledPrice / scaleFactor, "Price");
+
+    std::uint64_t fractional = 0;
+    const std::size_t retainedDigits =
+        std::min(fractionalText.size(), static_cast<std::size_t>(configuration.priceScale));
+    for (std::size_t index = 0; index < retainedDigits; ++index) {
+        const char character = fractionalText[index];
+        if (character < '0' || character > '9') {
+            throw FixValidationError("Price must be an unsigned decimal");
+        }
+        fractional = fractional * 10 + static_cast<std::uint64_t>(character - '0');
+    }
+    for (std::size_t index = retainedDigits; index < configuration.priceScale; ++index) {
+        fractional *= 10;
+    }
+    for (std::size_t index = retainedDigits; index < fractionalText.size(); ++index) {
+        const char character = fractionalText[index];
+        if (character < '0' || character > '9') {
+            throw FixValidationError("Price must be an unsigned decimal");
+        }
+        if (character != '0') {
+            throw FixValidationError("Price violates the configured tick size");
+        }
+    }
+
+    const std::uint64_t scaledWhole = whole * scaleFactor;
+    if (fractional > maxScaledPrice - scaledWhole) {
+        throw FixValidationError("Price is outside the configured range");
+    }
+    const std::uint64_t scaledPrice = scaledWhole + fractional;
+    if (scaledPrice == 0) {
+        throw FixValidationError("Price is outside the configured range");
+    }
+    if (scaledPrice % configuration.tickSizeMantissa != 0) {
+        throw FixValidationError("Price violates the configured tick size");
+    }
+    return scaledPrice / configuration.tickSizeMantissa;
+}
+
+std::uint64_t parseQuantityUnits(const std::string_view text,
+                                 const instrument::InstrumentConfiguration& configuration) {
+    const std::size_t decimalPoint = text.find('.');
+    if (decimalPoint != std::string_view::npos && text.find('.', decimalPoint + 1) != std::string_view::npos) {
+        throw FixValidationError("OrderQty must contain at most one decimal point");
+    }
+
+    const std::string_view wholeText = text.substr(0, decimalPoint);
+    const std::string_view fractionalText =
+        decimalPoint == std::string_view::npos ? std::string_view{} : text.substr(decimalPoint + 1);
+    if (wholeText.empty() || (decimalPoint != std::string_view::npos && fractionalText.empty())) {
+        throw FixValidationError("OrderQty must be a positive whole number");
+    }
+    for (const char character : fractionalText) {
+        if (character != '0') {
+            throw FixValidationError("OrderQty violates the configured lot size");
+        }
+    }
+
+    const std::uint64_t quantity = parseUnsignedWhole(wholeText, configuration.maxOrderQuantity, "OrderQty");
+    if (quantity == 0 || configuration.lotSize == 0 || quantity % configuration.lotSize != 0) {
+        throw FixValidationError("OrderQty violates the configured lot size");
+    }
+    return quantity;
+}
+
 /*
  * Returns whether this parser can currently preserve the requested TIF
  * semantics all the way through the matching engine.
@@ -28,15 +150,15 @@ using exchange::core::task::TimeInForce;
  */
 bool isSupportedTimeInForce(const TimeInForce tif) {
     switch (tif) {
-    case TimeInForce::DAY:
-    case TimeInForce::GTC:
-    case TimeInForce::IOC:
-    case TimeInForce::FOK:
-    case TimeInForce::ATC:
-    case TimeInForce::GTD:
-        return true;
-    case TimeInForce::GTX:
-        return false;
+        case TimeInForce::DAY:
+        case TimeInForce::GTC:
+        case TimeInForce::IOC:
+        case TimeInForce::FOK:
+        case TimeInForce::ATC:
+        case TimeInForce::GTD:
+            return true;
+        case TimeInForce::GTX:
+            return false;
     }
     return false;
 }
@@ -48,8 +170,7 @@ bool isSupportedTimeInForce(const TimeInForce tif) {
  */
 std::chrono::system_clock::time_point endOfCurrentUtcDay() {
     const auto now = std::chrono::system_clock::now();
-    const auto secondsSinceEpoch =
-        std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+    const auto secondsSinceEpoch = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
     const auto nextUtcMidnightSeconds = ((secondsSinceEpoch / 86400) + 1) * 86400;
     return std::chrono::system_clock::time_point{std::chrono::seconds(nextUtcMidnightSeconds)};
 }
@@ -63,11 +184,9 @@ std::chrono::system_clock::time_point atcCloseOfCurrentUtcDay() {
     constexpr int64_t atcCloseSeconds = (16 * 60 * 60) + (30 * 60);
 
     const auto now = std::chrono::system_clock::now();
-    const auto secondsSinceEpoch =
-        std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+    const auto secondsSinceEpoch = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
     const auto currentUtcMidnightSeconds = (secondsSinceEpoch / secondsPerDay) * secondsPerDay;
-    return std::chrono::system_clock::time_point{
-        std::chrono::seconds(currentUtcMidnightSeconds + atcCloseSeconds)};
+    return std::chrono::system_clock::time_point{std::chrono::seconds(currentUtcMidnightSeconds + atcCloseSeconds)};
 }
 
 /*
@@ -77,7 +196,7 @@ std::chrono::system_clock::time_point atcCloseOfCurrentUtcDay() {
  * Bad combinations found here:
  * - Unsupported TIF values are rejected before they can reach the sequencer.
  */
-TimeInForce extractTimeInForce(const FIX::Message &fixMessage) {
+TimeInForce extractTimeInForce(const FIX::Message& fixMessage) {
     FIX::TimeInForce tif;
     if (!fixMessage.isSetField(tif)) {
         return TimeInForce::DAY;
@@ -95,7 +214,7 @@ TimeInForce extractTimeInForce(const FIX::Message &fixMessage) {
  * Converts FIX ExpireTime into the system_clock representation used by
  * sequenceMessage. Caller must ensure tag 126 is present.
  */
-std::chrono::system_clock::time_point parseExpireTime(const FIX::Message &fixMessage) {
+std::chrono::system_clock::time_point parseExpireTime(const FIX::Message& fixMessage) {
     FIX::ExpireTime expiry;
     fixMessage.getField(expiry);
 
@@ -115,45 +234,44 @@ std::chrono::system_clock::time_point parseExpireTime(const FIX::Message &fixMes
  * - ATC + ExpireTime: rejected because ATC expiry is exchange/session-owned.
  * - GTX: rejected because these semantics are not implemented yet.
  */
-std::chrono::system_clock::time_point validateExpiry(const FIX::Message &fixMessage,
-                                                     const TimeInForce tif) {
+std::chrono::system_clock::time_point validateExpiry(const FIX::Message& fixMessage, const TimeInForce tif) {
     const bool hasExpireTime = fixMessage.isSetField(FIX::FIELD::ExpireTime);
 
     switch (tif) {
-    case TimeInForce::DAY:
-        if (hasExpireTime) {
-            throw FixValidationError("DAY orders must not specify ExpireTime");
-        }
-        return endOfCurrentUtcDay();
+        case TimeInForce::DAY:
+            if (hasExpireTime) {
+                throw FixValidationError("DAY orders must not specify ExpireTime");
+            }
+            return endOfCurrentUtcDay();
 
-    case TimeInForce::GTC:
-    case TimeInForce::IOC:
-    case TimeInForce::FOK:
-        if (hasExpireTime) {
-            throw FixValidationError("ExpireTime is only valid for GTD orders");
-        }
-        return {};
+        case TimeInForce::GTC:
+        case TimeInForce::IOC:
+        case TimeInForce::FOK:
+            if (hasExpireTime) {
+                throw FixValidationError("ExpireTime is only valid for GTD orders");
+            }
+            return {};
 
-    case TimeInForce::ATC:
-        if (hasExpireTime) {
-            throw FixValidationError("ATC orders must not specify ExpireTime");
-        }
-        return atcCloseOfCurrentUtcDay();
+        case TimeInForce::ATC:
+            if (hasExpireTime) {
+                throw FixValidationError("ATC orders must not specify ExpireTime");
+            }
+            return atcCloseOfCurrentUtcDay();
 
-    case TimeInForce::GTD: {
-        if (!hasExpireTime) {
-            throw FixValidationError("GTD orders require ExpireTime");
+        case TimeInForce::GTD: {
+            if (!hasExpireTime) {
+                throw FixValidationError("GTD orders require ExpireTime");
+            }
+
+            const auto expiry = parseExpireTime(fixMessage);
+            if (expiry <= std::chrono::system_clock::now()) {
+                throw FixValidationError("ExpireTime must be in the future");
+            }
+            return expiry;
         }
 
-        const auto expiry = parseExpireTime(fixMessage);
-        if (expiry <= std::chrono::system_clock::now()) {
-            throw FixValidationError("ExpireTime must be in the future");
-        }
-        return expiry;
-    }
-
-    case TimeInForce::GTX:
-        throw FixValidationError("unsupported TimeInForce");
+        case TimeInForce::GTX:
+            throw FixValidationError("unsupported TimeInForce");
     }
 
     throw FixValidationError("unsupported TimeInForce");
@@ -164,7 +282,7 @@ std::chrono::system_clock::time_point validateExpiry(const FIX::Message &fixMess
  * Bad combinations found here: non-limit orders are rejected because the current
  * matching engine only models priced book orders.
  */
-void validateNewOrderType(const FIX::Message &fixMessage) {
+void validateNewOrderType(const FIX::Message& fixMessage) {
     FIX::OrdType ordType;
     if (!fixMessage.isSetField(ordType)) {
         throw FIX::FieldNotFound(FIX::FIELD::OrdType);
@@ -181,7 +299,7 @@ void validateNewOrderType(const FIX::Message &fixMessage) {
  * Bad combinations found here: anything other than buy/sell is rejected because
  * the sequencer only has BUY/SELL order directions.
  */
-sequencer::orderType extractSide(const FIX::Message &fixMessage) {
+sequencer::orderType extractSide(const FIX::Message& fixMessage) {
     FIX::Side side;
     if (!fixMessage.isSetField(side)) {
         throw FIX::FieldNotFound(FIX::FIELD::Side);
@@ -199,43 +317,23 @@ sequencer::orderType extractSide(const FIX::Message &fixMessage) {
 }
 
 /*
- * Extracts quantity in the integer lot model currently used downstream.
- * Bad combinations found here: zero, negative, non-finite, and fractional
- * quantities are rejected before integer conversion.
+ * Extracts quantity using the exact decimal lot model from instrument configuration.
  */
-uint64_t extractOrderQty(const FIX::Message &fixMessage) {
-    FIX::OrderQty qty;
-    if (!fixMessage.isSetField(qty)) {
+uint64_t extractOrderQty(const FIX::Message& fixMessage, const instrument::InstrumentConfiguration& configuration) {
+    if (!fixMessage.isSetField(FIX::FIELD::OrderQty)) {
         throw FIX::FieldNotFound(FIX::FIELD::OrderQty);
     }
-
-    fixMessage.getField(qty);
-    const auto value = qty.getValue();
-    if (!std::isfinite(value) || value <= 0 || std::floor(value) != value) {
-        throw FixValidationError("OrderQty must be a positive whole number");
-    }
-
-    return static_cast<uint64_t>(value);
+    return parseQuantityUnits(fixMessage.getField(FIX::FIELD::OrderQty), configuration);
 }
 
 /*
- * Extracts a positive limit price and converts it into fixed-point ticks
- * scaled by 10000 for sequenceMessage.
- * Bad combinations found here: zero, negative, and non-finite prices.
+ * Extracts a positive limit price as an exact number of configured ticks.
  */
-uint64_t extractLimitPrice(const FIX::Message &fixMessage) {
-    FIX::Price price;
-    if (!fixMessage.isSetField(price)) {
+uint64_t extractLimitPrice(const FIX::Message& fixMessage, const instrument::InstrumentConfiguration& configuration) {
+    if (!fixMessage.isSetField(FIX::FIELD::Price)) {
         throw FIX::FieldNotFound(FIX::FIELD::Price);
     }
-
-    fixMessage.getField(price);
-    const auto value = price.getValue();
-    if (!std::isfinite(value) || value <= 0) {
-        throw FixValidationError("Price must be positive");
-    }
-
-    return static_cast<uint64_t>(value * 10000);
+    return parsePriceTicks(fixMessage.getField(FIX::FIELD::Price), configuration);
 }
 
 /*
@@ -243,21 +341,20 @@ uint64_t extractLimitPrice(const FIX::Message &fixMessage) {
  * placement-only lifetime fields.
  * Bad combinations found here: Cancel + TimeInForce and Cancel + ExpireTime.
  */
-void validateCancel(const FIX::Message &fixMessage) {
-    if (fixMessage.isSetField(FIX::FIELD::TimeInForce) ||
-        fixMessage.isSetField(FIX::FIELD::ExpireTime)) {
+void validateCancel(const FIX::Message& fixMessage) {
+    if (fixMessage.isSetField(FIX::FIELD::TimeInForce) || fixMessage.isSetField(FIX::FIELD::ExpireTime)) {
         throw FixValidationError("cancel messages must not specify TimeInForce or ExpireTime");
     }
 }
 
 } /* namespace */
 
-bool isProcessableMessageType(const std::string &msgType) {
+bool isProcessableMessageType(const std::string& msgType) {
     return msgType == "D" || msgType == "F";
 }
 
-sequencer::sequenceMessage parseFixMessage(const FIX::Message &fixMessage,
-                                           const FIX::SessionID &sessionID, size_t numShards) {
+sequencer::sequenceMessage parseFixMessage(const FIX::Message& fixMessage, const FIX::SessionID& sessionID,
+                                           size_t numShards) {
     try {
         FIX::MsgType msgType;
         fixMessage.getHeader().getField(msgType);
@@ -278,26 +375,33 @@ sequencer::sequenceMessage parseFixMessage(const FIX::Message &fixMessage,
             seqMsg.type = extractSide(fixMessage);
         }
 
-        /* Extract symbol */
+        /* Resolve the authoritative instrument configuration. */
         FIX::Symbol symbol;
-        if (fixMessage.isSetField(symbol)) {
-            fixMessage.getField(symbol);
-            std::strncpy(seqMsg.symbol, symbol.getValue().c_str(), sizeof(seqMsg.symbol) - 1);
-            seqMsg.symbol[sizeof(seqMsg.symbol) - 1] = '\0';
-
-            /* Determine shard based on ticker hash */
-            std::string ticker{seqMsg.symbol};
-            seqMsg.shard_id = std::hash<std::string>{}(ticker) % numShards;
+        if (!fixMessage.isSetField(symbol)) {
+            throw FIX::FieldNotFound(FIX::FIELD::Symbol);
         }
+        fixMessage.getField(symbol);
+        const instrument::InstrumentConfiguration* configuration = instrument::findBySymbol(symbol.getValue());
+        if (configuration == nullptr) {
+            throw FixValidationError("unknown or inactive instrument");
+        }
+        std::strncpy(seqMsg.symbol, symbol.getValue().c_str(), sizeof(seqMsg.symbol) - 1);
+        seqMsg.symbol[sizeof(seqMsg.symbol) - 1] = '\0';
+        seqMsg.instrumentId = configuration->instrumentId;
+        seqMsg.configurationVersion = configuration->configurationVersion;
+
+        /* Determine shard based on ticker hash */
+        std::string ticker{seqMsg.symbol};
+        seqMsg.shard_id = std::hash<std::string>{}(ticker) % numShards;
 
         /* Extract order quantity */
         if (seqMsg.type != sequencer::orderType::CANCEL) {
-            seqMsg.quantity = extractOrderQty(fixMessage);
+            seqMsg.quantity = extractOrderQty(fixMessage, *configuration);
         }
 
-        /* Extract price (in basis points, multiplied by 10000) */
+        /* Extract price as an exact number of configured ticks. */
         if (seqMsg.type != sequencer::orderType::CANCEL) {
-            seqMsg.price = extractLimitPrice(fixMessage);
+            seqMsg.price = extractLimitPrice(fixMessage, *configuration);
         }
 
         /* Extract order ID */
@@ -318,10 +422,10 @@ sequencer::sequenceMessage parseFixMessage(const FIX::Message &fixMessage,
 
         return seqMsg;
 
-    } catch (const FIX::FieldNotFound &e) {
+    } catch (const FIX::FieldNotFound& e) {
         std::cerr << "[FixParser] Required field missing: " << e.field << std::endl;
         throw;
-    } catch (const std::exception &e) {
+    } catch (const std::exception& e) {
         std::cerr << "[FixParser] Error parsing FIX message: " << e.what() << std::endl;
         throw;
     }
