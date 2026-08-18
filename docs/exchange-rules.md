@@ -23,31 +23,295 @@ from **Unresolved decisions**. Code must not silently decide unresolved behavior
 
 ## Adopted rules
 
-No detailed market rules have yet been formally adopted.
+### Initial command and TimeInForce scope
 
-The project goals—multiple instruments, deterministic and fair processing, recovery and replay, clear
-events, and reliable bounded operation—constrain future decisions, but they do not by themselves
-define complete exchange behavior.
+- The initial order-entry scope is limit BUY and limit SELL orders.
+- GTC and IOC are supported TimeInForce values.
+- Cancellation is a supported command.
+- Other order types, TimeInForce values, modification, expiry, and auction behavior are deferred and
+  are not part of the adopted initial behavior.
+- A GTC order may rest any quantity remaining after matching.
+- An IOC order never rests. After all possible executions, any remaining quantity is cancelled.
+
+### Price and quantity representation
+
+- `Price` is a strong unsigned type backed by `uint64_t`, representing a number of ticks.
+- The meaning of one tick is defined by versioned instrument configuration. A journaled command must
+  be associated with the configuration version needed to interpret its price during replay.
+- `Quantity` is a strong unsigned type backed by `uint64_t`, representing a number of quantity
+  units.
+- Price and quantity are distinct semantic domains and must not be treated as interchangeable values.
+- Valid order prices and quantities are greater than zero.
+- Every arithmetic operation that could overflow or underflow is checked. Checks occur before the
+  affected matching-state mutation becomes externally visible.
+- For every execution, `ExecutionQuantity` is no greater than either order's quantity remaining
+  immediately before that execution.
+- Subtracting an execution or cancellation quantity cannot underflow, and adding an order to a
+  price-level aggregate cannot overflow.
+
+The maximum values, lot rules, and conversion rules remain unresolved.
+
+### Identifiers and retransmission
+
+- `CommandSequence` is the globally unique, monotonically increasing authoritative command identity.
+  Its underlying representation is `uint64_t`. It is never reused. Monotonicity does not by itself
+  prohibit gaps.
+- Every normalized NewOrder has an `OrderId` whose numeric value equals its `CommandSequence`.
+  `OrderId` is a distinct strong type backed by `uint64_t` and is never reused.
+- `ClientId` is a stable exchange-assigned client identity. It remains the same across transport
+  sessions and reconnects. It is a distinct strong type backed by `uint64_t`.
+- `ClientCommandId` is selected by the client and is unique within that `ClientId`. The logical
+  command identity is `(ClientId, ClientCommandId)`. `ClientCommandId` is a bounded-string strong
+  type containing between 1 and 64 ASCII bytes. Comparison is case-sensitive and exact byte for
+  byte; no trimming, case folding, or text normalization is applied. It must not be represented
+  solely by a hash.
+- Repeating the same logical command with identical normalized contents returns its previously
+  determined result and does not execute the business action again or emit new business events.
+- Reusing the same logical command identity with different normalized contents is rejected as
+  `DuplicateCommandConflict` and does not mutate matching state.
+- The exchange must retain or reconstruct enough deduplication state to preserve these rules after
+  reconnect and recovery.
+- `InstrumentId` is a stable exchange-defined numeric identifier. Matching rules use it rather than
+  an external symbol string. It is a distinct strong type backed by `uint64_t`.
+- `EventId` is `(commandSequence, eventIndex)`. It is globally unique in the deterministic business
+  event stream. `EventIndex` is a distinct strong type backed by `uint32_t`.
+- `CommandSequence` and `EventIndex` never wrap. The exchange stops admitting affected work before
+  identifier exhaustion rather than reusing an identifier; configured capacity must prevent one
+  command from requiring more event positions than `EventIndex` can represent.
+- No independent `TradeId` is required initially; the `EventId` of a `Trade` identifies that trade.
+- Authoritative exchange-assigned identifiers are never reused.
+
+### Normalized command schemas
+
+The normalized, sequenced NewOrder command contains:
+
+- `CommandSequence`;
+- `ClientId` and `ClientCommandId`;
+- `InstrumentId` and `ConfigurationVersion`;
+- `Side`;
+- `Price` and `Quantity`;
+- `TimeInForce`.
+
+Its `OrderId` is derived by wrapping the same underlying numeric value as `CommandSequence`; it does
+not require a second independently generated identity.
+
+The normalized, sequenced Cancel command contains:
+
+- `CommandSequence`;
+- `ClientId` and `ClientCommandId`;
+- `InstrumentId` for routing and validation;
+- `TargetOrderId`.
+
+The cancellation target remains `TargetOrderId`. `InstrumentId` does not form part of the order's
+identity.
+
+### Matching priority and trade formation
+
+- Continuous trading uses price-time priority.
+- BUY orders receive best-price priority at the highest eligible bid price. SELL orders receive
+  best-price priority at the lowest eligible ask price.
+- Within one price level, the lower authoritative command sequence has priority.
+- Wall-clock timestamps and thread scheduling do not establish matching priority.
+- A crossing incoming order executes at the resting order's price.
+- Partial fills and multiple fills are supported.
+- One `Trade` event represents exactly one match between an incoming order and one resting order.
+- Trades created by one incoming command are emitted in matching order: best price first, then time
+  priority within each price level.
+- Filled quantity cannot exceed original quantity, remaining quantity cannot be negative, and a
+  fully filled order is no longer active.
+- The aggregate quantity at a price level equals the sum of the remaining quantities of its active
+  orders.
+
+### Command sequencing and processing
+
+- The sequencer assigns every sequenced command one authoritative global command sequence.
+- Every command that passes pre-sequencing admission receives a sequence, including a command that
+  later produces a state-dependent `CommandRejected` event.
+- Commands assigned to a state-owning partition are processed in increasing authoritative command
+  sequence order.
+- A state-owning partition completes all matching-state transitions and event generation for one
+  command before it begins processing its next command.
+- Independent partitions may operate concurrently. Whether publication must preserve a single
+  real-time order across independent partitions remains unresolved.
+
+### Business events
+
+- Events caused by one command are emitted in the same order as their corresponding state
+  transitions.
+- Every event is identified by the pair `(commandSequence, eventIndex)`.
+- `eventIndex` starts at zero for each command and increases by one for every event produced by that
+  command.
+- The initial business-event types are:
+  - `CommandRejected`;
+  - `Trade`;
+  - `OrderRested`;
+  - `OrderCancelled`.
+- A `Trade` contains:
+  - `EventId`;
+  - `InstrumentId`;
+  - `MakerOrderId` and `MakerClientId`;
+  - `TakerOrderId` and `TakerClientId`;
+  - `TakerSide`;
+  - `ExecutionPrice` and `ExecutionQuantity`;
+  - `MakerRemainingQuantity` and `TakerRemainingQuantity`.
+- An `OrderRested` contains:
+  - `EventId`;
+  - `OrderId` and `ClientId`;
+  - `InstrumentId`;
+  - `Side` and `Price`;
+  - `RemainingQuantity`.
+- An `OrderCancelled` contains:
+  - `EventId`;
+  - `OrderId` and `ClientId`;
+  - `InstrumentId`;
+  - `CancelledQuantity`;
+  - `CancelReason`.
+- A `CommandRejected` contains:
+  - `EventId`;
+  - `CommandType`;
+  - `ClientId` and `ClientCommandId`;
+  - an optional `RelevantOrderId`;
+  - a stable machine-readable `RejectionReason`.
+- There are no separate `PartialFill`, `FullFill`, or `OrderFilled` events.
+- A zero remaining quantity in a `Trade` records that the corresponding order became fully filled.
+- A fully filled incoming order produces its `Trade` events and no additional terminal event.
+- `OrderRested` is emitted only when positive remaining quantity actually enters the order book.
+- `OrderCancelled` reports exactly the quantity removed and distinguishes at least
+  `ClientRequested` from `IocRemainder` through `CancelReason`.
+- After all `Trade` events from an incoming order:
+  - a GTC remainder produces `OrderRested`;
+  - an IOC remainder produces `OrderCancelled`.
+- A rejected command changes no matching-engine state and produces exactly one `CommandRejected`
+  event.
+
+### Cancellation
+
+- A cancellation targets an exchange `OrderId`.
+- An order is active exactly when it is resting in its instrument's order book with positive
+  remaining quantity.
+- Fully filled, previously cancelled, IOC-terminal, rejected, and never-accepted orders are not
+  active.
+- Only the owning `ClientId` may cancel an active order.
+- A successful cancellation removes exactly the order's current remaining quantity.
+- A partially filled order may be cancelled for its remaining quantity; earlier fills remain valid.
+- A successful cancellation emits one `OrderCancelled` containing the quantity actually removed.
+- A target that is not active produces exactly one `CommandRejected` with reason `OrderNotActive`.
+- An active target owned by another client produces exactly one `CommandRejected` with reason
+  `NotOwner`.
+- Retransmitting the same `(ClientId, ClientCommandId)` returns the previously determined result and
+  does not perform cancellation again.
+- A new cancel command with a new `ClientCommandId` against an already-terminal order is rejected as
+  `OrderNotActive`.
+- Fill-versus-cancel outcomes are determined only by authoritative command sequence order on the
+  target order's state-owning partition.
+- When processing a Cancel, the owning partition first looks up `TargetOrderId` in its active-order
+  state. Absence produces `OrderNotActive`; presence followed by an owner mismatch produces
+  `NotOwner`; otherwise the remaining quantity is removed atomically from both the order book and
+  active-order state.
+
+### Self-trading
+
+- Self-trading is allowed in the initial rule set.
+- No self-trade prevention behavior is claimed until a different rule is explicitly adopted.
+
+### Validation boundary
+
+- Before sequencing, the gateway and normalization boundary rejects:
+  - malformed protocol messages;
+  - missing required fields;
+  - numeric parsing and overflow failures;
+  - unknown or invalid enum values;
+  - unknown or inactive instruments;
+  - tick-size and lot-size violations under the authoritative versioned instrument configuration.
+- Instrument resolution and the applicable configuration version are therefore established before
+  sequencing and recorded in the normalized command.
+- After normalization and before global sequence assignment, one authoritative command-admission
+  boundary enforces `(ClientId, ClientCommandId)` uniqueness for all gateways. This is not an
+  independent cache owned by each gateway.
+- An identical retransmission returns or waits for the original result and receives no new
+  `CommandSequence`. Conflicting reuse receives `DuplicateCommandConflict` as an admission rejection
+  and also receives no new `CommandSequence`.
+- The admission index is reconstructed from the authoritative command journal during recovery. An
+  in-flight reservation lost before journal durability may be admitted again after restart because
+  no business action was durably committed.
+- A failure before sequencing receives no `CommandSequence`, is not written to the authoritative
+  command journal, and cannot emit an EventId-bearing business event. It receives the appropriate
+  gateway admission or protocol rejection response instead.
+- After sequencing and durable journal append, state-dependent validation includes:
+  - order ownership;
+  - whether a cancellation target exists and is active;
+  - state-dependent order conflicts;
+  - any adopted book- or session-dependent rules.
+- A state-dependent failure changes no matching state and emits exactly one `CommandRejected`.
+- Initial stable rejection reasons are:
+  - `DuplicateCommandConflict` for conflicting logical command reuse at admission;
+  - `OrderNotActive` for a new cancellation targeting an order that is not active;
+  - `NotOwner` for a cancellation targeting another client's active order;
+  - `BookCapacityExceeded` when a sequenced command cannot be applied within configured matching
+    capacity without violating a numeric or resource bound.
+
+### Authoritative journal, durability, and replay
+
+- The normalized, sequenced command journal is the authoritative recovery record.
+- Commands recorded in the journal are immutable.
+- Replay processes the journal through the same deterministic matching behavior and regenerates
+  business events with the same identifiers, order, and content.
+- Replication is not required by the initial durability model.
+- A command is externally committed only after its normalized, sequenced journal record completes
+  the configured durable-write operation. The initial operation is `fdatasync`, `fsync`, or the
+  platform-equivalent durable synchronization selected by the implementation.
+- Initially, every command receives one durable synchronization. A later group-commit policy may
+  make multiple commands durable with one synchronization operation, but no command may be reported
+  as committed before the group containing it is durable.
+- Performance results must state the durability policy. A benchmark must not claim improved durable
+  latency by acknowledging before durability without explicitly describing the weaker guarantee.
+- The initial commit path is:
+  1. assign the global command sequence;
+  2. append the immutable normalized command;
+  3. complete the configured durable synchronization;
+  4. process the command;
+  5. publish the resulting events;
+  6. acknowledge the business result.
 
 ## Unresolved decisions
 
-### 1. Supported orders and TimeInForce
+### 1. Command representation and numeric limits
 
-**Question:** Which commands and TimeInForce values are part of the first supported rule set and the
-eventual project scope?
+Command fields, identifier semantics, underlying integer widths, unsigned Price and Quantity, and
+checked arithmetic are adopted. The following remain unresolved:
 
-**Options to decide:**
+- Serialized command representation and schema-version compatibility.
+- Minimum and maximum price, quantity, and notional.
+- Tick value and quantity/lot unit per instrument.
+- Exact decimal-to-tick conversion rules.
 
-- Limit orders only initially, or limit and market orders.
-- DAY, GTC, IOC, FOK, GTD, ATC, or another supported subset.
-- Continuous trading only, or eventual auction phases.
-- Whether unsupported order types are rejected at the gateway or as sequenced business rejections.
+### 2. Sequencer admission, fairness, and gaps
 
-**Current recommendation:** Begin with limit BUY and SELL plus one explicitly defined resting
-TimeInForce. Add cancel next, followed by IOC and FOK. Add expiry-based and auction behavior only
-after trading-session rules exist.
+The global sequence scope is adopted, but the following remain unresolved:
 
-### 2. Trading sessions and expiry
+- The fair merge policy when several sessions or gateways submit concurrently.
+- Handling of missing positions, duplicate internal delivery, and restart.
+- Whether commands for independent partitions may publish events concurrently or require a global
+  publication merge.
+- Whether sequence positions may contain durable gaps after a failure during assignment or append.
+
+### 3. Event visibility and delivery
+
+The initial event schemas and deterministic ordering are adopted. The following remain unresolved:
+
+- Which event data is private, public, or both.
+- How gateways recover or redeliver a business result after disconnect.
+- Whether cross-partition consumers observe events in globally sorted `EventId` order.
+
+### 4. Instrument and configuration lifecycle
+
+Stable numeric instruments and versioned configuration are adopted. The following remain unresolved:
+
+- Supported currencies or other instrument classes.
+- External symbol format, rename policy, and mapping to `InstrumentId`.
+- Configuration activation, persistence, compatibility, and version migration.
+
+### 5. Trading sessions and expiry
 
 **Question:** What do DAY, GTD, and ATC mean?
 
@@ -62,70 +326,15 @@ after trading-session rules exist.
 **Current recommendation:** Do not support session-dependent TimeInForce values until a deterministic
 session calendar and replay rule have been adopted.
 
-### 3. Price priority and time priority
+### 6. Deferred order and TimeInForce behavior
 
-**Question:** What matching priority should continuous trading use?
+GTC, IOC, and cancellation are in the initial scope. The following remain unresolved and deferred:
 
-**Options to decide:**
-
-- Price-time priority.
-- Pro-rata or another policy.
-- Whether one policy applies to every instrument.
-- Which authoritative sequence establishes time priority.
-
-**Current recommendation:** Use price-time priority: highest bid and lowest ask first, then the
-authoritative command sequence within a price level. Do not use wall-clock timestamps or thread
-scheduling to break ties.
-
-### 4. Trade-price determination
-
-**Question:** At what price does a crossing order execute?
-
-**Options to decide:**
-
-- Resting-order price.
-- Incoming-order price.
-- Another deterministic rule.
-
-**Current recommendation:** Execute at the resting order's price.
-
-### 5. Partial and multiple fills
-
-**Question:** What are the exact state and event rules when one order matches one or more resting
-orders?
-
-**Options to decide:**
-
-- Whether partial fills are supported.
-- Event ordering for multiple fills.
-- Whether one execution event is emitted per resting counter-order or per incoming command.
-- Which aggregate and terminal-state events follow the fills.
-
-**Current recommendation:** Support partial and multiple fills. Emit one trade/execution result per
-counter-order in matching order. Each emitted quantity must agree exactly with both orders' state
-changes.
-
-**Candidate invariants:**
-
-- Filled quantity never exceeds original quantity.
-- Remaining quantity never becomes negative.
-- Price-level aggregate quantity equals the sum of active order quantities at that level.
-- A fully filled order is no longer active.
-
-### 6. Cancellation
-
-**Question:** How is an active order targeted and what result does each cancel situation produce?
-
-**Options to decide:**
-
-- Target by exchange order ID, client order ID plus scope, or both.
-- Whether repeated cancellation is idempotent or rejected.
-- Results for unknown, already-filled, expired, already-cancelled, or wrong-owner targets.
-- Event ordering when fills and a cancellation race.
-
-**Current recommendation:** Sequence cancellation like any other command. It takes effect at its
-authoritative sequence position and removes only the remaining active quantity. Earlier fills remain
-valid; later commands observe the cancellation.
+- Market orders.
+- DAY, FOK, GTD, ATC, GTX, and any other TimeInForce values.
+- Trading-session and auction behavior.
+- Expiry behavior.
+- The eventual order-type and TimeInForce scope.
 
 ### 7. Modification
 
@@ -141,173 +350,7 @@ valid; later commands observe the cancellation.
 **Current recommendation:** Start with cancel-replace. If atomic amendment is added later, consider
 preserving priority only for a quantity reduction at the same price.
 
-### 8. Price representation
-
-**Question:** What exact integer unit represents price?
-
-**Options to decide:**
-
-- Currency minor units such as cents.
-- One global fixed decimal scale.
-- Instrument-specific price ticks.
-
-**Current recommendation:** Represent price internally as integer ticks and configure tick value per
-instrument. External decimal prices must convert exactly; otherwise reject them.
-
-**Additional decisions:**
-
-- Supported currencies or non-currency instruments.
-- Maximum price and notional.
-- Tick-size configuration and versioning.
-
-### 9. Quantity representation
-
-**Question:** What exact unit and range represents quantity?
-
-**Options to decide:**
-
-- Whole shares or contracts only.
-- Fractional quantities with a fixed scale.
-- Instrument-specific lot units.
-
-**Current recommendation:** Begin with positive integer quantity units and explicit per-instrument lot
-rules. Check every conversion and arithmetic operation for range and overflow.
-
-### 10. Instruments and symbols
-
-**Question:** How are instruments identified and configured?
-
-**Options to decide:**
-
-- Text symbol as the internal identity.
-- Stable exchange-assigned numeric instrument ID with an external symbol mapping.
-- Symbol character set, length, and rename policy.
-- Configuration persistence and versioning.
-
-**Current recommendation:** Use a stable numeric `InstrumentId` internally and treat the external
-symbol as validated configuration data. Never silently truncate or hash a symbol as its sole identity.
-
-### 11. Order, client, and session identifiers
-
-**Question:** What identifiers exist and what is each uniqueness scope?
-
-**Identifiers to define:**
-
-- Client or account ID.
-- Transport session ID.
-- Client-supplied order ID.
-- Exchange-assigned order ID.
-- Command sequence.
-- Event sequence.
-- Trade ID.
-
-**Options to decide:**
-
-- Client order-ID uniqueness per session, client, trading day, or retained history.
-- Whether a terminal order ID may be reused.
-- How retries and duplicate commands are detected.
-- How reconnecting sessions retain client identity.
-
-**Current recommendation:** Give exchange orders and trades stable exchange-assigned IDs. Scope client
-order IDs to a documented client identity and retain enough information to make retries idempotent.
-Do not use implementation-defined hashes as stable identities.
-
-### 12. Validation and rejection
-
-**Question:** Which checks happen before sequencing and which are deterministic business checks at the
-matching partition?
-
-**Checks to classify:**
-
-- Required fields and protocol syntax.
-- Instrument existence.
-- Price and quantity representation and range.
-- Supported side, order type, and TimeInForce combinations.
-- Duplicate IDs.
-- Ownership and authorization.
-- Stateful order and cancellation checks.
-
-**Options to decide:**
-
-- Whether pre-sequencing rejections appear in the authoritative event stream.
-- Rejection-code taxonomy.
-- Whether every syntactically valid command receives a sequence position.
-
-**Current recommendation:** Keep lossless parsing and stateless format/range checks at the gateway.
-Sequence state-dependent decisions so replay produces the same result. Every rejection must have a
-stable machine-readable reason and must not mutate the book.
-
-### 13. Self-trading
-
-**Question:** Is self-trading allowed, and what ownership scope defines "self"?
-
-**Options to decide:**
-
-- Allow self-trading.
-- Cancel the incoming order.
-- Cancel the resting order.
-- Cancel both.
-- Apply another deterministic prevention rule.
-
-**Additional decisions:**
-
-- Account, client, firm, or another ownership scope.
-- Events emitted by prevention.
-- Priority effects when a resting order is removed.
-
-**Current recommendation:** Do not claim self-trade prevention until stable account ownership exists.
-If prevention is adopted, base it on account ownership rather than a transport session.
-
-### 14. Sequencing and fairness
-
-**Question:** What is the authoritative processing order?
-
-**Options to decide:**
-
-- One global command sequence.
-- One sequence per instrument partition.
-- One sequence per instrument.
-- Whether cross-instrument event order is meaningful.
-
-**Additional decisions:**
-
-- The sequencing boundary: gateway normalization, journal append, or partition acceptance.
-- Fair merging across client sessions.
-- Treatment of gaps, duplicates, retries, and partition migration.
-- Whether rejected commands consume sequence positions.
-
-**Current recommendation:** Require one deterministic order for every command that can affect the same
-instrument. Independent instruments may process concurrently. Define fairness at a sequencing
-boundary before commands enter concurrent processing.
-
-### 15. Order and execution events
-
-**Question:** Which immutable business events are emitted for each command?
-
-**Candidate events:**
-
-- Command accepted.
-- Command rejected.
-- Order resting.
-- Partial fill.
-- Full fill.
-- Trade.
-- Cancel accepted.
-- Cancel rejected.
-- Order expired.
-
-**Additional decisions:**
-
-- Exact order-state model.
-- Event sequence scope.
-- Event order when one command creates multiple trades.
-- Which events are private to clients.
-- Which events are durable or may be regenerated.
-
-**Current recommendation:** Emit immutable typed events rather than mutated command objects. Events
-must contain sufficient identifiers and sequence information for routing, audit, and replay.
-
-### 16. Market-data events
+### 8. Market-data events
 
 **Question:** What public market data does the exchange publish?
 
@@ -327,47 +370,21 @@ must contain sufficient identifiers and sequence information for routing, audit,
 **Current recommendation:** Start with deterministic trade and top-of-book events. Do not describe the
 feed as reliable until consumers can recover from a sequence gap using a snapshot.
 
-### 17. Determinism and replay
+### 9. Recovery and replay edge cases
 
-**Question:** What inputs and configuration must reproduce identical state and events?
+The authoritative command journal and initial durability point are adopted. The following remain
+unresolved:
 
-**Decisions required:**
+- Record framing, checksums, format compatibility, and log rotation.
+- Handling a truncated final record versus corruption in the middle of a journal.
+- Snapshot frequency, contents, and validation.
+- Recovery-time target and clean-shutdown guarantees.
+- Whether recovery republishes events and how consumers deduplicate them.
+- How configuration versions are retained and loaded for replay.
+- Behavior when durable synchronization succeeds but processing or publication fails before the
+  client receives its result.
 
-- Authoritative command log, event log, or both.
-- Versioning of behavioral configuration.
-- Treatment of timestamps and expiry during replay.
-- Whether recovery republishes events.
-- Consumer deduplication.
-- Handling corrupted or truncated records.
-
-**Current recommendation:** Given the same initial configuration and authoritative command sequence,
-replay should produce identical order state and business events. Wall clocks, random values, memory
-addresses, thread scheduling, and implementation-defined hashes must not decide matching results.
-
-### 18. Acknowledgement and durability
-
-**Question:** When may the exchange tell a client that a command was accepted?
-
-**Options to decide:**
-
-- Before journal append.
-- After append to process memory.
-- After operating-system write.
-- After durable flush.
-- After matching and event persistence.
-
-**Additional decisions:**
-
-- Snapshot frequency.
-- Recovery-time target.
-- Tolerated acknowledged-data loss.
-- Clean shutdown guarantees.
-
-**Current recommendation:** Do not acknowledge acceptance until the command is recoverable according
-to an explicitly adopted durability level. Begin with a local append-only journal and periodic
-snapshots rather than requiring external databases.
-
-### 19. Backpressure and unavailable components
+### 10. Backpressure and unavailable components
 
 **Question:** What happens when an ingress or internal boundary reaches capacity or a component is
 unavailable?
@@ -388,14 +405,16 @@ unavailable?
 **Current recommendation:** Use bounded queues with observable saturation. Once a command has been
 acknowledged as accepted, it must complete or remain recoverable; it must not be silently discarded.
 
-### Recommended decision order
+### Decisions required before completing the initial matching engine
 
-1. Price, quantity, instrument, client, order, and trade identifiers.
-2. Initial supported order and TimeInForce set.
-3. Price-time priority, trade price, partial fills, and event ordering.
-4. Cancellation, duplicate handling, and modification.
-5. Sequencing boundary and fairness.
-6. Command and event schemas.
-7. Acknowledgement, journaling, snapshots, and replay.
-8. Additional TimeInForce and order types.
-9. Market-data recovery and later performance work.
+Before completing all adopted initial matching behavior, decide:
+
+1. supported maximum price, quantity, and aggregate ranges;
+2. tick and lot configuration for the first test instruments;
+3. any additional state-dependent `RejectionReason` values;
+4. whether event publication is globally merged across partitions.
+
+Trading sessions, expiry, modification, additional order types, market data, snapshots, and group
+commit can remain deferred. New-order state-machine tests can begin before event delivery and
+cross-partition publication are implemented, provided the tests use the adopted event schemas and
+ordering.
