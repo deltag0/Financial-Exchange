@@ -9,7 +9,7 @@ def main():
     # allow time for the acceptor to register the session
     time.sleep(0.5)
 
-    symbols = ["AAPL", "MSFT", "GOOG", "TSLA", "AMZN", "NFLX"]
+    symbols = ["SPY"]
     for symbol in symbols:
         client.send_order(symbol, "1", 100, 150.0)
         time.sleep(0.1)

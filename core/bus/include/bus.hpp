@@ -135,6 +135,29 @@ class Bus {
         return true;
     }
 
+    bool read(std::atomic<cursor_type>& cursor, sequencer::sequenceMessage& output) {
+        const cursor_type current_cursor = cursor.load(std::memory_order_acquire);
+        const cursor_type next_write = total_writes_.load(std::memory_order_acquire);
+        if (current_cursor >= next_write) {
+            return false;
+        }
+
+        const cursor_type oldest_available = next_write > size_ ? next_write - size_ : 0;
+        if (current_cursor < oldest_available) {
+            return false;
+        }
+
+        const std::size_t index = static_cast<std::size_t>(current_cursor % size_);
+        const std::optional<sequencer::sequenceMessage>& slot = buffer_[index];
+        if (!slot.has_value()) {
+            return false;
+        }
+
+        output = slot.value();
+        cursor.store(current_cursor + 1, std::memory_order_release);
+        return true;
+    }
+
   private:
     /*
      * Core write implementation with perfect forwarding for both lvalue and rvalue.

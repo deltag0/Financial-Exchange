@@ -48,8 +48,25 @@ from **Unresolved decisions**. Code must not silently decide unresolved behavior
   immediately before that execution.
 - Subtracting an execution or cancellation quantity cannot underflow, and adding an order to a
   price-level aggregate cannot overflow.
-
-The maximum values, lot rules, and conversion rules remain unresolved.
+- A price-level aggregate is the sum of remaining quantity at one
+  `(InstrumentId, Side, Price)` and therefore treats bid and ask levels separately.
+- The initial configured test instrument has external symbol `SPY`, `InstrumentId` 1, and
+  `ConfigurationVersion` 1. This configuration does not claim connectivity to or trading in the
+  real-world SPY instrument.
+- For `SPY` configuration version 1:
+  - one tick is exactly 0.0001 quote units;
+  - the minimum price is 1 tick, or 0.0001 quote units;
+  - the maximum price is 10,000,000,000 ticks, or 1,000,000.0000 quote units;
+  - one quantity unit and the lot size are both 1;
+  - the maximum quantity of one order is 100,000,000 quantity units;
+  - the maximum aggregate at one price level is 1,000,000,000 quantity units.
+- External price and quantity fields are parsed as decimal text without conversion through binary
+  floating point. Equivalent price spellings such as `12.34` and `12.3400` normalize to 123,400
+  ticks. Non-zero precision beyond four decimal places is a tick-size violation. Quantity must be
+  mathematically integral and a multiple of the configured lot size.
+- Price and order-quantity limit violations are rejected before sequencing. A price-level aggregate
+  violation is state-dependent and produces `BookCapacityExceeded` after sequencing without trades
+  or matching-state mutation.
 
 ### Identifiers and retransmission
 
@@ -281,9 +298,9 @@ Command fields, identifier semantics, underlying integer widths, unsigned Price 
 checked arithmetic are adopted. The following remain unresolved:
 
 - Serialized command representation and schema-version compatibility.
-- Minimum and maximum price, quantity, and notional.
-- Tick value and quantity/lot unit per instrument.
-- Exact decimal-to-tick conversion rules.
+- Maximum notional and any notional conversion or rounding rules.
+- Numeric limits, tick value, quantity unit, and lot size for instruments other than the initial
+  `SPY` test configuration.
 
 ### 2. Sequencer admission, fairness, and gaps
 
@@ -409,10 +426,8 @@ acknowledged as accepted, it must complete or remain recoverable; it must not be
 
 Before completing all adopted initial matching behavior, decide:
 
-1. supported maximum price, quantity, and aggregate ranges;
-2. tick and lot configuration for the first test instruments;
-3. any additional state-dependent `RejectionReason` values;
-4. whether event publication is globally merged across partitions.
+1. any additional state-dependent `RejectionReason` values;
+2. whether event publication is globally merged across partitions.
 
 Trading sessions, expiry, modification, additional order types, market data, snapshots, and group
 commit can remain deferred. New-order state-machine tests can begin before event delivery and

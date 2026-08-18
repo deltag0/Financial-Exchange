@@ -70,11 +70,10 @@ void FixTask::run() {
 
         for (int i = 0; i < INT_BURST_MESSAGES; ++i) {
             bool check = false;
-            sequencer::sequenceMessage* internalMsg;
+            sequencer::sequenceMessage internalMsg{};
             check = multicastBus.read(cursor, internalMsg);
 
-            if (!check)
-                break;
+            if (!check) break;
 
             // ! Just for now print it out
             std::cout << "[FixTask] -> Multicast Internal Message ID: " << internalMsg.id

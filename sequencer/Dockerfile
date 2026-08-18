@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     clangd \
     clang-format \
     libboost-all-dev \
+    libgtest-dev \
     libquickfix-dev \
     wget \
     gdb \
@@ -23,7 +24,7 @@ COPY matching_engine/ ./matching_engine/
 
 # Pre-build the application
 RUN cmake -B build -S .
-RUN cmake --build build --target sequencer_app -j$(nproc)
+RUN cmake --build build --parallel
 
 # Default command remains as sleep for development containers
 # This allows the user to exec into it or run commands via docker-compose

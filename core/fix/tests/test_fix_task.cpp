@@ -8,7 +8,7 @@ using namespace exchange::sequencer;
 TEST(FixTaskTest, FromAppPushesToQueue) {
     // Prepare sequencer queue and multicast bus
     exchange::core::SharedQueue<sequenceMessage> seq_q(16);
-    std::vector<exchange::core::SharedQueue<sequenceMessage> *> sequencer_queues;
+    std::vector<exchange::core::SharedQueue<sequenceMessage>*> sequencer_queues;
     sequencer_queues.push_back(&seq_q);
 
     exchange::core::Bus bus(8);
@@ -19,7 +19,7 @@ TEST(FixTaskTest, FromAppPushesToQueue) {
     FIX::Message msg;
     msg.getHeader().setField(FIX::MsgType("D"));
     msg.setField(FIX::ClOrdID("ORD1"));
-    msg.setField(FIX::Symbol("TST"));
+    msg.setField(FIX::Symbol("SPY"));
     msg.setField(FIX::Side(FIX::Side_BUY));
     msg.setField(FIX::OrderQty(5));
     msg.setField(FIX::Price(1.23));
@@ -35,5 +35,5 @@ TEST(FixTaskTest, FromAppPushesToQueue) {
     EXPECT_TRUE(popped);
     EXPECT_EQ(out.quantity, 5);
     EXPECT_EQ(out.type, orderType::BUY);
-    EXPECT_STREQ(out.symbol, "TST");
+    EXPECT_STREQ(out.symbol, "SPY");
 }

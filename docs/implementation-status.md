@@ -24,20 +24,20 @@ feature is implemented.
 
 | Area | Status | Current behavior | Relevant code | Existing coverage | Main limitation |
 |---|---|---|---|---|---|
-| C++ exchange executable | Partially implemented | Constructs FIX handling, four sequencers, one matching engine, queues, and worker threads | `core/exchange/src/main.cpp` | Python sharding fixtures expect the executable | No coordinated shutdown; container does not launch it by default |
+| C++ exchange executable | Partially implemented | Source constructs FIX handling, four sequencers, one matching engine, queues, and worker threads | `core/exchange/src/main.cpp` | Full Docker build compiles the executable; Python sharding fixtures expect it | No coordinated shutdown; container does not launch it by default; live startup was not verified |
 | FIX acceptor | Partially implemented | Configures a QuickFIX FIX 4.2 acceptor on port 5001 | `core/exchange/src/main.cpp`, `exchange.cfg` | Python test client and sharding tests | One configured session; live startup was not verified |
-| New Order Single parsing | Partially implemented | Recognizes `35=D`, limit BUY/SELL, quantity, price, symbol, client order ID, TimeInForce, and expiry | `core/fix/src/fix_parser.cpp` | `core/fix/tests/test_fix_parser*.cpp`, `test_fix_malformed.cpp` | Symbol and ID requirements are incomplete; numeric conversion has range and precision risks |
+| New Order Single parsing | Partially implemented | Accepts configured `SPY` v1 limit orders, parses price and quantity from decimal text, enforces tick/lot and configured maximums, and records instrument/configuration IDs | `core/instrument/include/instrument_config.hpp`, `core/fix/src/fix_parser.cpp` | Deterministic configured-boundary, malformed-value, unknown-instrument, and existing parser tests | Client order ID requirements and adopted TimeInForce scope are not fully enforced; admission responses are not delivered to clients |
 | Cancel Request parsing | Parsed only | Recognizes `35=F` and produces an internal CANCEL message | `core/fix/src/fix_parser.cpp`, `core/fix/src/fix_task.cpp` | Parser and FixTask tests | Does not establish a complete original-order target; engine ignores CANCEL |
 | Order modification | Missing | FIX modification messages are not processed | — | None | No amend or cancel-replace behavior |
 | TimeInForce parsing | Partially implemented | Defaults to DAY; parses DAY, GTC, IOC, FOK, GTD, and ATC with several expiry checks; rejects GTX | `core/fix/src/fix_parser.cpp`, `core/task/include/time_in_force.hpp` | Parser validation tests | Matching behavior is incomplete or absent for several accepted values |
-| Internal order message | Partially implemented | Stores IDs, sequence fields, price, quantity, fixed symbol buffer, side, expiry, shard, and TimeInForce | `sequencer/include/sequence_message.hpp` | Used throughout C++ tests | Several field meanings and uniqueness scopes are undefined |
+| Internal order message | Partially implemented | Stores raw-width IDs including instrument/configuration IDs, sequence fields, integer price ticks, integer quantity units, fixed symbol buffer, side, expiry, shard, and TimeInForce | `sequencer/include/sequence_message.hpp` | Used throughout C++ tests | Adopted strong types are not implemented; several identifier meanings and uniqueness scopes remain undefined |
 | In-process bounded queue | Partially implemented | Wraps `boost::lockfree::queue` with `push`, `pop`, and `empty` | `core/shared_queue/include/shared_queue.hpp` | Exercised indirectly | It is not process-shared IPC; full-queue policy is incomplete |
-| Multicast bus | Partially implemented | Circular in-process buffer with registered reader cursors and overwrite protection | `core/bus/include/bus.hpp` | `core/bus/tests/bus_test.cpp` | Intended writer model is implicit; journal output is not a recovery log |
-| Symbol sharding | Partially implemented | Hashes the truncated symbol into four shard queues | `core/fix/src/fix_parser.cpp`, `core/exchange/src/main.cpp` | `sequencer/tests/test_sequencer_sharding.py` | Uses implementation-defined hashing; no stable partition configuration |
+| Multicast bus | Partially implemented | Circular in-process buffer with registered reader cursors and overwrite protection; stack-message reads copy an available slot before advancing the cursor | `core/bus/include/bus.hpp` | `BusUnitTests` covers stack-message reads, basic ordering, wrap-around, multiple cursors, capacity, and one-writer/one-reader concurrency | Intended writer model is implicit; the unused legacy pointer/journal read overload is unsafe; journal output is not a recovery log |
+| Symbol sharding | Partially implemented | Resolves the sole configured `SPY` instrument, then hashes its symbol into four shard queues | `core/fix/src/fix_parser.cpp`, `core/exchange/src/main.cpp` | `sequencer/tests/test_sequencer_sharding.py` targets `SPY` | Uses implementation-defined hashing; no stable partition configuration or multi-instrument coverage |
 | Sequencing | Partially implemented | Each sequencer increments one local counter and a per-port counter | `sequencer/include/sequencer.hpp`, `sequencer/src/sequencer.cpp` | Sharding tests and synthetic throughput tests | “Global” numbers are not unique across sequencers; no authoritative durable order |
-| BUY matching | Partially implemented | Incoming BUY can match eligible resting SELL orders by ascending sell price and FIFO queue order | `matching_engine/src/matching_engine.cpp` | Two focused matching tests | Normal processing cannot create resting sells; complete matching invariants are untested |
+| BUY matching | Partially implemented | Incoming BUY can match eligible resting SELL orders by ascending sell price and FIFO queue order; resting GTC capacity is preflighted before mutation | `matching_engine/src/matching_engine.cpp` | Partial-fill, unfillable-FOK, aggregate-boundary, and aggregate-preflight tests | Normal processing cannot create resting sells; capacity rejection events and complete matching invariants are missing |
 | SELL matching | Stubbed | `processSellOrder` calls an empty `matchSellOrder` | `matching_engine/src/matching_engine.cpp` | None | SELL orders neither match nor rest through the normal path |
-| Order books | Partially implemented | Nested symbol/price maps store FIFO order queues and aggregate quantity | `matching_engine/include/matching_engine.hpp`, `matching_engine/src/matching_engine.cpp` | Partial BUY-side tests | Duplicate IDs, expiry cleanup, symmetric matching, and safe removal are incomplete |
+| Order books | Partially implemented | Nested symbol/price maps store FIFO order queues and checked per-side aggregate quantity; additions above the `SPY` v1 aggregate maximum return `BOOK_CAPACITY_EXCEEDED` without mutation | `matching_engine/include/matching_engine.hpp`, `matching_engine/src/matching_engine.cpp` | Exact aggregate maximum, next-unit rejection, and crossing-GTC no-partial-mutation tests | The internal result is not emitted as the adopted `CommandRejected` event; duplicate IDs, expiry cleanup, symmetric matching, and safe removal are incomplete |
 | Cancellation processing | Stubbed | CANCEL and CANCELREJ switch branches exist but do nothing | `matching_engine/src/matching_engine.cpp` | Parsing only | Cannot cancel an active order or emit a cancel result |
 | IOC BUY | Partially implemented | Matches immediately and does not rest the remainder | `matching_engine/src/matching_engine.cpp` | No direct IOC remainder test | BUY side only; no execution result |
 | FOK BUY | Partially implemented | Checks aggregate eligible sell quantity before matching | `matching_engine/src/matching_engine.cpp` | One unfillable-FOK test | Successful multi-level FOK and invariant preservation are untested |
@@ -65,10 +65,8 @@ These are implementation findings, not exchange rules:
   an ID while the index represents only one value.
 - Client order IDs, sessions, and symbols rely on `std::hash`; collisions and cross-platform results
   are not handled as identity concerns.
-- Floating-point FIX price conversion multiplies by 10,000 and casts to `uint64_t` without a complete
-  exactness or upper-bound check.
-- Missing or overlong symbols and missing client order IDs are not consistently rejected. Long
-  symbols are truncated.
+- Missing client order IDs are not consistently rejected, and client IDs are still represented by
+  hashes rather than the adopted stable identity model.
 - Resting order expiry is not regularly checked, and `checkOrderExpiry` is not part of the normal
   matching loop.
 - An accepted parser TimeInForce can reach a matching branch that performs no business action.
@@ -79,25 +77,34 @@ These are implementation findings, not exchange rules:
 - `FixTask` and `MatchingEngine` spin continuously when idle, while sequencers sleep for 10 ms between
   polls.
 - Matching state changes are not paired with durable or client-visible events.
+- The unused legacy `Bus::read` pointer overload does not return its pointer assignment to the
+  caller, can underflow its overwrite test, and allocates one message before indexing it as an
+  array. Current callers use the tested stack-message overload instead.
 
 ## Existing test coverage
 
 | Test area | Files | What is covered | Important gaps |
 |---|---|---|---|
 | Multicast bus | `core/bus/tests/bus_test.cpp` | Basic ordering, wrap-around, multiple cursors, capacity, and one-writer/one-reader concurrency | Multiple writers, cursor lifetime, journal behavior |
-| FIX parsing | `core/fix/tests/test_fix_parser.cpp`, `test_fix_parser_edgecases.cpp`, `test_fix_malformed.cpp` | Basic order parsing, selected invalid fields, TimeInForce/expiry combinations, malformed values | Identifier scope, exact price conversion, upper bounds, independent required-field tests |
+| FIX parsing | `core/fix/tests/test_fix_parser.cpp`, `test_fix_parser_edgecases.cpp`, `test_fix_malformed.cpp` | Basic order parsing, exact `SPY` v1 price/quantity normalization, configured maxima, off-tick/lot/range rejection, unknown instrument, selected TimeInForce/expiry combinations, malformed values | Identifier scope, other instruments, independent required-field tests, client-visible admission responses |
 | FIX task | `core/fix/tests/test_fix_task.cpp` and edge-case tests | `fromApp` queues supported parsed messages and catches parser failures | Continuous run loop, queue saturation, client rejection delivery |
-| Matching engine | `matching_engine/tests/test_matching_engine.cpp` | Queue drain, one partial BUY fill, one unfillable FOK case | SELL path, full fill, multiple fills, price priority, FIFO, cancel, duplicate ID, expiry, events |
+| Matching engine | `matching_engine/tests/test_matching_engine.cpp` | Queue drain, one partial BUY fill, one unfillable FOK case, aggregate maximum and next-unit boundary, crossing-GTC capacity rejection without partial mutation | SELL path, full fill, multiple fills, price priority, FIFO, cancel, duplicate ID, expiry, rejection events |
 | C++ timed pipeline | `sequencer/tests/test_e2e_throughput.cpp` | Queue and parser plumbing under timed load | Real matching behavior, reproducibility, percentiles, drops, controlled hardware/build settings |
 | Live FIX sharding | `sequencer/tests/test_sequencer_sharding.py` | Same symbol observed on a consistent shard | Business result, matching, recovery, globally defined fairness |
 
 ## Build and runtime verification
 
-- **Last source inspection:** 2026-07-26
-- **Inspected commit:** `1e80a02`
-- **Build performed during this documentation change:** No
-- **Tests performed during this documentation change:** No
+- **Last source inspection:** 2026-08-17
+- **Inspected base commit:** `0b9d08c` with the documented working-tree changes
+- **Build performed during this change:** Yes. Building `sequencer/Dockerfile` completed the full
+  CMake target graph, including all libraries, the exchange executable, and all configured test
+  executables. The Dockerfile installs GoogleTest from Ubuntu's package repository. Native CMake
+  configuration on the host was not rerun; the earlier attempt failed because Boost was unavailable.
+- **Tests performed during this change:** Yes, from that built Docker image: `BusUnitTests`,
+  `FixParserUnitTests`, `FixTaskUnitTests`, and `MatchingEngineUnitTests` all passed (4/4).
 - **Runtime stack verification performed:** No
 
-The status table is based on source and test inspection. “Unverified” must remain until the relevant
-commands are run and their results are recorded.
+The focused numeric behavior and the stack-message bus read used by `FixTask` are covered by passing
+deterministic tests in the documented Docker build environment. No end-to-end or live runtime
+behavior was verified. The Docker environment is command-reproducible but not bit-for-bit pinned:
+the Ubuntu base tag and apt package versions remain mutable.

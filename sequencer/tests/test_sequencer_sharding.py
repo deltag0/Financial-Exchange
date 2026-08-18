@@ -33,12 +33,12 @@ def parse_shard_logs(log_path):
 
 def test_sharding_consistency(sequencer_process, fix_client):
     """
-    Verify that multiple orders for the same symbol are always routed to the same shard.
+    Verify that multiple orders for the configured instrument are always routed to the same shard.
     """
     proc, log_path = sequencer_process
     client = fix_client
     
-    symbols = ["AAPL", "MSFT", "GOOG", "TSLA"]
+    symbols = ["SPY"]
     rounds = 3
     
     # Send orders multiple times for each symbol
@@ -54,16 +54,14 @@ def test_sharding_consistency(sequencer_process, fix_client):
         if ticker in symbols:
             assert len(shards) == 1, f"Ticker {ticker} was seen on multiple shards: {shards}"
 
-def test_shard_distribution(sequencer_process, fix_client):
+def test_configured_instrument_is_observed(sequencer_process, fix_client):
     """
-    Verify that orders for different symbols are processed and routed consistently.
-    Distribution is implementation-defined because sharding uses std::hash, so the
-    stable contract we check here is that all sent symbols are observed in the logs.
+    Verify that the configured instrument is processed and appears in sequencer logs.
     """
     proc, log_path = sequencer_process
     client = fix_client
     
-    symbols = ["AAPL", "MSFT", "GOOG", "TSLA", "AMZN", "NFLX", "META", "NVDA"]
+    symbols = ["SPY"]
     
     # Send orders for many symbols
     for symbol in symbols:
@@ -77,7 +75,7 @@ def test_shard_distribution(sequencer_process, fix_client):
         assert len(ticker_to_shards[ticker]) == 1, f"Ticker {ticker} was seen on multiple shards: {ticker_to_shards[ticker]}"
 
 
-def test_all_order_messages_are_processed(sequencer_process, fix_client):
+def test_configured_order_message_is_processed(sequencer_process, fix_client):
     """
     Smoke test for the continuous FixTask loop: once orders are sent, they should
     show up in sequencer logs without relying on a fixed sleep window.
@@ -85,7 +83,7 @@ def test_all_order_messages_are_processed(sequencer_process, fix_client):
     proc, log_path = sequencer_process
     client = fix_client
 
-    symbols = ["AAPL", "MSFT", "GOOG"]
+    symbols = ["SPY"]
     for symbol in symbols:
         client.send_order(symbol, "1", 25, 42.0)
 
