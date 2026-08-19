@@ -84,8 +84,9 @@ from **Unresolved decisions**. Code must not silently decide unresolved behavior
   solely by a hash.
 - Repeating the same logical command with identical normalized contents returns its previously
   determined result and does not execute the business action again or emit new business events.
-- Reusing the same logical command identity with different normalized contents is rejected as
-  `DuplicateCommandConflict` and does not mutate matching state.
+- Reusing the same logical command identity with different normalized contents receives the
+  admission rejection reason `DuplicateCommandConflict`, receives no `CommandSequence`, emits no
+  business event, and does not mutate matching state.
 - The exchange must retain or reconstruct enough deduplication state to preserve these rules after
   reconnect and recovery.
 - `InstrumentId` is a stable exchange-defined numeric identifier. Matching rules use it rather than
@@ -188,7 +189,7 @@ identity.
   - `CommandType`;
   - `ClientId` and `ClientCommandId`;
   - an optional `RelevantOrderId`;
-  - a stable machine-readable `RejectionReason`.
+  - a stable machine-readable `CommandRejectionReason`.
 - There are no separate `PartialFill`, `FullFill`, or `OrderFilled` events.
 - A zero remaining quantity in a `Trade` records that the corresponding order became fully filled.
 - A fully filled incoming order produces its `Trade` events and no additional terminal event.
@@ -260,8 +261,10 @@ identity.
   - state-dependent order conflicts;
   - any adopted book- or session-dependent rules.
 - A state-dependent failure changes no matching state and emits exactly one `CommandRejected`.
-- Initial stable rejection reasons are:
-  - `DuplicateCommandConflict` for conflicting logical command reuse at admission;
+- The initial stable `AdmissionRejectionReason` is `DuplicateCommandConflict` for conflicting
+  logical command reuse. An admission rejection is a gateway response, not a `CommandRejected`
+  business event, because it has no `CommandSequence` or `EventId`.
+- Initial stable `CommandRejectionReason` values for sequenced commands are:
   - `OrderNotActive` for a new cancellation targeting an order that is not active;
   - `NotOwner` for a cancellation targeting another client's active order;
   - `BookCapacityExceeded` when a sequenced command cannot be applied within configured matching
@@ -426,7 +429,7 @@ acknowledged as accepted, it must complete or remain recoverable; it must not be
 
 Before completing all adopted initial matching behavior, decide:
 
-1. any additional state-dependent `RejectionReason` values;
+1. any additional state-dependent `CommandRejectionReason` values;
 2. whether event publication is globally merged across partitions.
 
 Trading sessions, expiry, modification, additional order types, market data, snapshots, and group

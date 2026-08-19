@@ -1,14 +1,17 @@
 #pragma once
 
 #include "../../bus/include/bus.hpp"
+#include "../../core/domain/include/business_events.hpp"
+#include "../../core/instrument/include/instrument_config.hpp"
 #include "../../core/shared_queue/include/shared_queue.hpp"
 #include "../../core/task/include/task.hpp"
-#include "../../core/instrument/include/instrument_config.hpp"
 #include "../../sequencer/include/sequencer.hpp"
+
 #include <cstdint>
 #include <map>
 #include <queue>
 #include <set>
+#include <vector>
 
 namespace exchange::matching_engine {
 
@@ -25,22 +28,27 @@ protected:
         BOOK_CAPACITY_EXCEEDED,
     };
 
+    struct ProcessingOutcome {
+        ProcessingResult result;
+        std::vector<domain::BusinessEvent> events;
+    };
+
     struct PriceLevel {
-        uint64_t totalQuantity = 0;
+        domain::Quantity totalQuantity{};
         std::queue<sequencer::sequenceMessage> orders;
     };
 
     void drainQueues(const char* source);
     void drainQueue(core::SharedQueue<sequencer::sequenceMessage>& queue, const char* source, std::size_t index = 0);
 
-    ProcessingResult processMessage(sequencer::sequenceMessage& message);
+    ProcessingOutcome processMessage(sequencer::sequenceMessage& message);
 
     /*
     Match incoming order against existing orders.
 
     Must guarantee that message type is BUY before calling.
     */
-    ProcessingResult processBuyOrder(sequencer::sequenceMessage& message);
+    ProcessingOutcome processBuyOrder(sequencer::sequenceMessage& message);
 
     ProcessingResult processSellOrder(sequencer::sequenceMessage& message);
 
@@ -57,9 +65,11 @@ protected:
     */
     bool canFullyFillBuyOrder(const sequencer::sequenceMessage& message) const;
 
-    uint64_t calculateBuyRemainder(const sequencer::sequenceMessage& message) const;
+    domain::Quantity calculateBuyRemainder(const sequencer::sequenceMessage& message) const;
 
-    bool canAddOrder(const sequencer::sequenceMessage& message, uint64_t quantity) const;
+    bool canAddOrder(const sequencer::sequenceMessage& message, domain::Quantity quantity) const;
+
+    ProcessingOutcome rejectBookCapacity(const sequencer::sequenceMessage& message) const;
 
     bool cleanBook(const sequencer::sequenceMessage& message);
 
@@ -81,11 +91,11 @@ protected:
     // Re-transmission bus for data to ports
     core::Bus& multicastBus;
 
-    std::unordered_map<std::string, std::map<uint64_t, PriceLevel, std::greater<uint64_t>>> buyOrders;
+    std::unordered_map<std::string, std::map<domain::Price, PriceLevel, std::greater<domain::Price>>> buyOrders;
 
-    std::unordered_map<std::string, std::map<uint64_t, PriceLevel>> sellOrders;
+    std::unordered_map<std::string, std::map<domain::Price, PriceLevel>> sellOrders;
 
-    std::set<uint64_t> orderIds;
+    std::set<domain::OrderId> orderIds;
 };
 
 } // namespace exchange::matching_engine

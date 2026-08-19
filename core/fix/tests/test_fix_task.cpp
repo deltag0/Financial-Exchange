@@ -33,7 +33,7 @@ TEST(FixTaskTest, FromAppPushesToQueue) {
     sequenceMessage out{};
     bool popped = fix_task.getFixMessageQueue()->pop(out);
     EXPECT_TRUE(popped);
-    EXPECT_EQ(out.quantity, 5);
+    EXPECT_EQ(out.quantity.value(), 5);
     EXPECT_EQ(out.type, orderType::BUY);
     EXPECT_STREQ(out.symbol, "SPY");
 }

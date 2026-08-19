@@ -28,6 +28,7 @@ add_library(core_lib
     core/fix/src/fix_parser.cpp
 )
 target_include_directories(core_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/domain/include
     ${CMAKE_CURRENT_SOURCE_DIR}/core/shared_queue/include
     ${CMAKE_CURRENT_SOURCE_DIR}/core/bus/include
     ${CMAKE_CURRENT_SOURCE_DIR}/core/fix/include

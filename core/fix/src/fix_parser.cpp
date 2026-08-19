@@ -54,7 +54,7 @@ std::uint64_t parseUnsignedWhole(const std::string_view text, const std::uint64_
     return value;
 }
 
-std::uint64_t parsePriceTicks(const std::string_view text, const instrument::InstrumentConfiguration& configuration) {
+domain::Price parsePriceTicks(const std::string_view text, const instrument::InstrumentConfiguration& configuration) {
     const std::size_t decimalPoint = text.find('.');
     if (decimalPoint != std::string_view::npos && text.find('.', decimalPoint + 1) != std::string_view::npos) {
         throw FixValidationError("Price must contain at most one decimal point");
@@ -68,11 +68,11 @@ std::uint64_t parsePriceTicks(const std::string_view text, const instrument::Ins
     }
 
     if (configuration.tickSizeMantissa == 0 ||
-        configuration.maxPriceTicks > std::numeric_limits<std::uint64_t>::max() / configuration.tickSizeMantissa) {
+        configuration.maxPrice.value() > std::numeric_limits<std::uint64_t>::max() / configuration.tickSizeMantissa) {
         throw std::logic_error("invalid instrument tick configuration");
     }
 
-    const std::uint64_t maxScaledPrice = configuration.maxPriceTicks * configuration.tickSizeMantissa;
+    const std::uint64_t maxScaledPrice = configuration.maxPrice.value() * configuration.tickSizeMantissa;
     const std::uint64_t scaleFactor = powerOfTen(configuration.priceScale);
     const std::uint64_t whole = parseUnsignedWhole(wholeText, maxScaledPrice / scaleFactor, "Price");
 
@@ -110,11 +110,11 @@ std::uint64_t parsePriceTicks(const std::string_view text, const instrument::Ins
     if (scaledPrice % configuration.tickSizeMantissa != 0) {
         throw FixValidationError("Price violates the configured tick size");
     }
-    return scaledPrice / configuration.tickSizeMantissa;
+    return domain::Price{scaledPrice / configuration.tickSizeMantissa};
 }
 
-std::uint64_t parseQuantityUnits(const std::string_view text,
-                                 const instrument::InstrumentConfiguration& configuration) {
+domain::Quantity parseQuantityUnits(const std::string_view text,
+                                    const instrument::InstrumentConfiguration& configuration) {
     const std::size_t decimalPoint = text.find('.');
     if (decimalPoint != std::string_view::npos && text.find('.', decimalPoint + 1) != std::string_view::npos) {
         throw FixValidationError("OrderQty must contain at most one decimal point");
@@ -132,11 +132,11 @@ std::uint64_t parseQuantityUnits(const std::string_view text,
         }
     }
 
-    const std::uint64_t quantity = parseUnsignedWhole(wholeText, configuration.maxOrderQuantity, "OrderQty");
-    if (quantity == 0 || configuration.lotSize == 0 || quantity % configuration.lotSize != 0) {
+    const std::uint64_t quantity = parseUnsignedWhole(wholeText, configuration.maxOrderQuantity.value(), "OrderQty");
+    if (quantity == 0 || configuration.lotSize.value() == 0 || quantity % configuration.lotSize.value() != 0) {
         throw FixValidationError("OrderQty violates the configured lot size");
     }
-    return quantity;
+    return domain::Quantity{quantity};
 }
 
 /*
@@ -319,7 +319,8 @@ sequencer::orderType extractSide(const FIX::Message& fixMessage) {
 /*
  * Extracts quantity using the exact decimal lot model from instrument configuration.
  */
-uint64_t extractOrderQty(const FIX::Message& fixMessage, const instrument::InstrumentConfiguration& configuration) {
+domain::Quantity extractOrderQty(const FIX::Message& fixMessage,
+                                 const instrument::InstrumentConfiguration& configuration) {
     if (!fixMessage.isSetField(FIX::FIELD::OrderQty)) {
         throw FIX::FieldNotFound(FIX::FIELD::OrderQty);
     }
@@ -329,7 +330,8 @@ uint64_t extractOrderQty(const FIX::Message& fixMessage, const instrument::Instr
 /*
  * Extracts a positive limit price as an exact number of configured ticks.
  */
-uint64_t extractLimitPrice(const FIX::Message& fixMessage, const instrument::InstrumentConfiguration& configuration) {
+domain::Price extractLimitPrice(const FIX::Message& fixMessage,
+                                const instrument::InstrumentConfiguration& configuration) {
     if (!fixMessage.isSetField(FIX::FIELD::Price)) {
         throw FIX::FieldNotFound(FIX::FIELD::Price);
     }
@@ -361,6 +363,7 @@ sequencer::sequenceMessage parseFixMessage(const FIX::Message& fixMessage, const
 
         sequencer::sequenceMessage seqMsg{};
         seqMsg.port = std::hash<std::string>{}(sessionID.toString());
+        seqMsg.clientId = domain::ClientId{seqMsg.port};
 
         if (numShards == 0) {
             throw FixValidationError("numShards must be greater than zero");
@@ -406,10 +409,9 @@ sequencer::sequenceMessage parseFixMessage(const FIX::Message& fixMessage, const
 
         /* Extract order ID */
         FIX::ClOrdID clOrdID;
-        if (fixMessage.isSetField(clOrdID)) {
-            fixMessage.getField(clOrdID);
-            seqMsg.id = std::hash<std::string>{}(clOrdID.getValue());
-        }
+        fixMessage.getField(clOrdID);
+        seqMsg.clientCommandId.emplace(clOrdID.getValue());
+        seqMsg.id = std::hash<std::string>{}(clOrdID.getValue());
 
         if (seqMsg.type != sequencer::orderType::CANCEL) {
             seqMsg.tif = extractTimeInForce(fixMessage);
