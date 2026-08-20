@@ -126,8 +126,8 @@ TEST(E2EThroughputTest, SequencerToMatchingEngineThroughput) {
         sequencer::sequenceMessage msg{};
         msg.id = client_messages_sent;
         msg.shard_id = client_messages_sent % num_shards;
-        msg.price = (client_messages_sent % 100) + 1;
-        msg.quantity = 10;
+        msg.price = domain::Price{static_cast<std::uint64_t>((client_messages_sent % 100) + 1)};
+        msg.quantity = domain::Quantity{10};
         msg.port = (client_messages_sent % 100);
         msg.topic = msg.port;
         strcpy(msg.symbol, "SPY");

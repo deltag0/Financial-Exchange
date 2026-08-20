@@ -6,10 +6,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
+#include "../../core/domain/include/domain_types.hpp"
 #include "../../core/task/include/time_in_force.hpp"
 
 namespace exchange {
@@ -87,16 +89,19 @@ tif: time in force of the order
 */
 struct sequenceMessage {
     uint64_t id;
-    uint64_t globalSequenceNumber;
+    domain::OrderId orderId;
+    domain::CommandSequence globalSequenceNumber;
     uint64_t topicSequenceNumber;
     uint64_t timestamp;
     uint64_t order;
     uint64_t port;
     uint64_t topic;
-    uint64_t instrumentId;
+    domain::ClientId clientId;
+    std::optional<domain::ClientCommandId> clientCommandId;
+    domain::InstrumentId instrumentId;
     uint64_t configurationVersion;
-    uint64_t price;
-    uint64_t quantity;
+    domain::Price price;
+    domain::Quantity quantity;
     char symbol[10];
     orderType type;
     std::chrono::system_clock::time_point expiry;
@@ -118,16 +123,16 @@ struct sequenceMessage {
         json.reserve(256);
         json += '{';
         json += "\"id\":" + std::to_string(id);
-        json += ",\"globalSequenceNumber\":" + std::to_string(globalSequenceNumber);
+        json += ",\"globalSequenceNumber\":" + std::to_string(globalSequenceNumber.value());
         json += ",\"topicSequenceNumber\":" + std::to_string(topicSequenceNumber);
         json += ",\"timestamp\":" + std::to_string(timestamp);
         json += ",\"order\":" + std::to_string(order);
         json += ",\"port\":" + std::to_string(port);
         json += ",\"topic\":" + std::to_string(topic);
-        json += ",\"instrumentId\":" + std::to_string(instrumentId);
+        json += ",\"instrumentId\":" + std::to_string(instrumentId.value());
         json += ",\"configurationVersion\":" + std::to_string(configurationVersion);
-        json += ",\"price\":" + std::to_string(price);
-        json += ",\"quantity\":" + std::to_string(quantity);
+        json += ",\"price\":" + std::to_string(price.value());
+        json += ",\"quantity\":" + std::to_string(quantity.value());
         json += ",\"symbol\":\"" + std::string(symbol, symbolLen) + "\"";
         json += ",\"type\":" + std::to_string(static_cast<int>(type));
         json += ",\"expiry\":" + std::to_string(expiryNs);
@@ -152,16 +157,17 @@ struct sequenceMessage {
 
         sequenceMessage message{};
         message.id = u64("id");
-        message.globalSequenceNumber = u64("globalSequenceNumber");
+        message.globalSequenceNumber = domain::CommandSequence{u64("globalSequenceNumber")};
+        message.orderId = domain::orderIdFrom(message.globalSequenceNumber);
         message.topicSequenceNumber = u64("topicSequenceNumber");
         message.timestamp = u64("timestamp");
         message.order = u64("order");
         message.port = u64("port");
         message.topic = u64("topic");
-        message.instrumentId = u64("instrumentId");
+        message.instrumentId = domain::InstrumentId{u64("instrumentId")};
         message.configurationVersion = u64("configurationVersion");
-        message.price = u64("price");
-        message.quantity = u64("quantity");
+        message.price = domain::Price{u64("price")};
+        message.quantity = domain::Quantity{u64("quantity")};
 
         const std::string symbol = std::string(detail::jsonValue(payload, "symbol"));
         std::memset(message.symbol, 0, sizeof(message.symbol));

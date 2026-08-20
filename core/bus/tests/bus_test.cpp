@@ -167,7 +167,7 @@ TEST(BusTest, ComplexDataType) {
 
     sequencer::sequenceMessage m{};
     m.id = 12345;
-    m.price = 999;
+    m.price = domain::Price{999};
     strcpy(m.symbol, "hello");
 
     EXPECT_TRUE(bus.write(m));
@@ -175,7 +175,7 @@ TEST(BusTest, ComplexDataType) {
     sequencer::sequenceMessage read_msg{};
     EXPECT_TRUE(bus.read(cursor, read_msg));
     EXPECT_EQ(read_msg.id, 12345u);
-    EXPECT_EQ(read_msg.price, 999u);
+    EXPECT_EQ(read_msg.price.value(), 999u);
     EXPECT_STREQ(read_msg.symbol, "hello");
 }
 
@@ -255,7 +255,9 @@ TEST(BusTest, CapacityQuery) {
 }
 
 // Test that zero-size bus throws
-TEST(BusTest, ZeroSizeThrows) { EXPECT_THROW(Bus bus(0), std::invalid_argument); }
+TEST(BusTest, ZeroSizeThrows) {
+    EXPECT_THROW(Bus bus(0), std::invalid_argument);
+}
 
 // Test with move semantics
 TEST(BusTest, MoveSemantics) {
@@ -339,7 +341,7 @@ TEST(BusTest, generalTest) {
 
 } // namespace exchange::core::test
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

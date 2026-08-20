@@ -53,11 +53,13 @@ TEST(FixParserTest, ParseNewOrderSingle) {
     auto seq = parseFixMessage(msg, sid, 4);
 
     EXPECT_EQ(seq.type, orderType::BUY);
-    EXPECT_EQ(seq.quantity, 100);
-    EXPECT_EQ(seq.price, 123400u);
+    EXPECT_EQ(seq.quantity.value(), 100);
+    EXPECT_EQ(seq.price.value(), 123400u);
     EXPECT_STREQ(seq.symbol, "SPY");
-    EXPECT_EQ(seq.instrumentId, 1u);
+    EXPECT_EQ(seq.instrumentId.value(), 1u);
     EXPECT_EQ(seq.configurationVersion, 1u);
+    ASSERT_TRUE(seq.clientCommandId.has_value());
+    EXPECT_EQ(seq.clientCommandId->value(), "ABC123");
     EXPECT_LT(seq.shard_id, 4);
     EXPECT_NE(seq.id, 0);
 }
@@ -66,14 +68,14 @@ TEST(FixParserTest, SpyV1AcceptsExactNumericBoundariesAndEquivalentDecimals) {
     const FIX::SessionID session("FIX.4.4", "SENDER", "TARGET");
 
     const auto maximum = parseFixMessage(makeSpyOrder("100000000.0", "1000000.0000"), session, 1);
-    EXPECT_EQ(maximum.quantity, 100000000u);
-    EXPECT_EQ(maximum.price, 10000000000u);
-    EXPECT_EQ(maximum.instrumentId, 1u);
+    EXPECT_EQ(maximum.quantity.value(), 100000000u);
+    EXPECT_EQ(maximum.price.value(), 10000000000u);
+    EXPECT_EQ(maximum.instrumentId.value(), 1u);
     EXPECT_EQ(maximum.configurationVersion, 1u);
 
     const auto equivalent = parseFixMessage(makeSpyOrder("1", "12.34000"), session, 1);
-    EXPECT_EQ(equivalent.quantity, 1u);
-    EXPECT_EQ(equivalent.price, 123400u);
+    EXPECT_EQ(equivalent.quantity.value(), 1u);
+    EXPECT_EQ(equivalent.price.value(), 123400u);
 }
 
 TEST(FixParserTest, SpyV1RejectsNumericValuesOutsideConfiguredBoundaries) {

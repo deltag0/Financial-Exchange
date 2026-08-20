@@ -30,6 +30,20 @@ TEST(FixParserEdgeCases, MissingSymbolQtyPriceClOrdIDTIF) {
     EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, 5), FIX::FieldNotFound);
 }
 
+TEST(FixParserEdgeCases, MissingClientCommandIdIsRejectedIndependently) {
+    FIX::Message message;
+    message.getHeader().setField(FIX::MsgType("D"));
+    message.setField(FIX::Symbol("SPY"));
+    message.setField(FIX::Side(FIX::Side_BUY));
+    message.setField(FIX::OrderQty(1));
+    message.setField(FIX::Price(1.0));
+    message.setField(FIX::OrdType(FIX::OrdType_LIMIT));
+    message.setField(FIX::TimeInForce(FIX::TimeInForce_GOOD_TILL_CANCEL));
+
+    const FIX::SessionID session("FIX.4.4", "S", "T");
+    EXPECT_THROW(exchange::core::fix::parseFixMessage(message, session, 1), FIX::FieldNotFound);
+}
+
 TEST(FixParserEdgeCases, ConfiguredMaximumValuesAndOrderCounter) {
     FIX::Message msg1;
     msg1.getHeader().setField(FIX::MsgType("D"));
@@ -48,8 +62,8 @@ TEST(FixParserEdgeCases, ConfiguredMaximumValuesAndOrderCounter) {
 
     EXPECT_GT(seq1.order, 0u);
     EXPECT_EQ(seq2.order, seq1.order + 1);
-    EXPECT_EQ(seq1.quantity, 100000000u);
-    EXPECT_EQ(seq1.price, 10000000000u);
+    EXPECT_EQ(seq1.quantity.value(), 100000000u);
+    EXPECT_EQ(seq1.price.value(), 10000000000u);
 }
 
 TEST(FixParserEdgeCases, HeaderMissingThrows) {

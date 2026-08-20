@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <sys/types.h>
 #include <thread>
+#include <utility>
 
 namespace exchange::matching_engine {
 
@@ -47,44 +48,45 @@ void MatchingEngine::drainQueue(core::SharedQueue<sequencer::sequenceMessage>& q
             return;
         }
 
-        static_cast<void>(processMessage(message));
+        const ProcessingOutcome outcome = processMessage(message);
+        static_cast<void>(outcome);
 
         send(message);
     }
 }
 
-MatchingEngine::ProcessingResult MatchingEngine::processBuyOrder(sequencer::sequenceMessage& message) {
+MatchingEngine::ProcessingOutcome MatchingEngine::processBuyOrder(sequencer::sequenceMessage& message) {
     switch (message.tif) {
         case core::task::TimeInForce::IOC: {
             matchBuyOrder(message);
-            return ProcessingResult::APPLIED;
+            return {ProcessingResult::APPLIED, {}};
         }
         case core::task::TimeInForce::FOK: {
             if (canFullyFillBuyOrder(message)) {
                 matchBuyOrder(message);
             }
-            return ProcessingResult::APPLIED;
+            return {ProcessingResult::APPLIED, {}};
         }
         case core::task::TimeInForce::GTX: {
-            return ProcessingResult::APPLIED;
+            return {ProcessingResult::APPLIED, {}};
         }
         case core::task::TimeInForce::ATC:
-            return ProcessingResult::APPLIED;
+            return {ProcessingResult::APPLIED, {}};
         case core::task::TimeInForce::GTC:
         case core::task::TimeInForce::DAY:
         case core::task::TimeInForce::GTD: {
-            const uint64_t prospectiveRemainder = calculateBuyRemainder(message);
+            const domain::Quantity prospectiveRemainder = calculateBuyRemainder(message);
             if (!canAddOrder(message, prospectiveRemainder)) {
-                return ProcessingResult::BOOK_CAPACITY_EXCEEDED;
+                return rejectBookCapacity(message);
             }
             matchBuyOrder(message);
-            if (message.quantity > 0) {
+            if (message.quantity.value() > 0) {
                 const ProcessingResult result = addOrder(message);
                 if (result != ProcessingResult::APPLIED) {
                     throw std::logic_error("price-level capacity changed during single-writer processing");
                 }
             }
-            return ProcessingResult::APPLIED;
+            return {ProcessingResult::APPLIED, {}};
         }
     }
     throw std::logic_error("unsupported TimeInForce reached matching engine");
@@ -97,8 +99,8 @@ MatchingEngine::ProcessingResult MatchingEngine::processSellOrder(sequencer::seq
     return ProcessingResult::APPLIED;
 }
 
-bool MatchingEngine::canAddOrder(const sequencer::sequenceMessage& message, const uint64_t quantity) const {
-    if (quantity == 0) {
+bool MatchingEngine::canAddOrder(const sequencer::sequenceMessage& message, const domain::Quantity quantity) const {
+    if (quantity.value() == 0) {
         return true;
     }
 
@@ -108,7 +110,7 @@ bool MatchingEngine::canAddOrder(const sequencer::sequenceMessage& message, cons
         throw std::logic_error("unknown instrument configuration reached matching engine");
     }
 
-    uint64_t currentAggregate = 0;
+    domain::Quantity currentAggregate{};
     if (message.type == sequencer::orderType::BUY) {
         const auto instrument = buyOrders.find(message.symbol);
         if (instrument != buyOrders.end()) {
@@ -129,8 +131,29 @@ bool MatchingEngine::canAddOrder(const sequencer::sequenceMessage& message, cons
         throw std::logic_error("non-order message cannot rest in the order book");
     }
 
-    const uint64_t maximum = configuration->maxPriceLevelAggregate;
-    return currentAggregate <= maximum && quantity <= maximum - currentAggregate;
+    const domain::Quantity maximum = configuration->maxPriceLevelAggregate;
+    return currentAggregate <= maximum && quantity.value() <= maximum.value() - currentAggregate.value();
+}
+
+MatchingEngine::ProcessingOutcome MatchingEngine::rejectBookCapacity(const sequencer::sequenceMessage& message) const {
+    if (!message.clientCommandId.has_value()) {
+        throw std::logic_error("sequenced command is missing ClientCommandId");
+    }
+
+    std::vector<domain::BusinessEvent> events;
+    events.emplace_back(domain::CommandRejected{
+        .eventId =
+            domain::EventId{
+                .commandSequence = message.globalSequenceNumber,
+                .eventIndex = domain::EventIndex{0},
+            },
+        .commandType = domain::CommandType::NEW_ORDER,
+        .clientId = message.clientId,
+        .clientCommandId = *message.clientCommandId,
+        .relevantOrderId = std::optional<domain::OrderId>{message.orderId},
+        .reason = domain::CommandRejectionReason::BOOK_CAPACITY_EXCEEDED,
+    });
+    return {ProcessingResult::BOOK_CAPACITY_EXCEEDED, std::move(events)};
 }
 
 MatchingEngine::ProcessingResult MatchingEngine::addOrder(const sequencer::sequenceMessage& message) {
@@ -144,18 +167,18 @@ MatchingEngine::ProcessingResult MatchingEngine::addOrder(const sequencer::seque
         }
         auto& priceLevel = buyOrders[message.symbol][message.price];
         priceLevel.orders.push(message);
-        priceLevel.totalQuantity += message.quantity;
+        priceLevel.totalQuantity = domain::Quantity{priceLevel.totalQuantity.value() + message.quantity.value()};
 
-        orderIds.insert(message.id);
+        orderIds.insert(message.orderId);
     } else if (message.type == sequencer::orderType::SELL) {
         if (!sellOrders.contains(message.symbol)) {
             sellOrders[message.symbol] = {};
         }
         auto& priceLevel = sellOrders[message.symbol][message.price];
         priceLevel.orders.push(message);
-        priceLevel.totalQuantity += message.quantity;
+        priceLevel.totalQuantity = domain::Quantity{priceLevel.totalQuantity.value() + message.quantity.value()};
 
-        orderIds.insert(message.id);
+        orderIds.insert(message.orderId);
     }
     return ProcessingResult::APPLIED;
 }
@@ -170,7 +193,7 @@ bool MatchingEngine::checkOrderExpiry(const sequencer::sequenceMessage& message)
 
 void MatchingEngine::removeOrder(const sequencer::sequenceMessage& message,
                                  std::queue<sequencer::sequenceMessage>* orderQueue) {
-    if (!orderIds.contains(message.id)) {
+    if (!orderIds.contains(message.orderId)) {
         return;
     }
 
@@ -178,38 +201,38 @@ void MatchingEngine::removeOrder(const sequencer::sequenceMessage& message,
         auto& priceLevel = buyOrders[message.symbol][message.price];
         auto& orders = orderQueue != nullptr ? *orderQueue : priceLevel.orders;
         if (!orders.empty()) {
-            priceLevel.totalQuantity -= message.quantity;
+            priceLevel.totalQuantity = domain::Quantity{priceLevel.totalQuantity.value() - message.quantity.value()};
             orders.pop();
         }
     } else if (message.type == sequencer::orderType::SELL) {
         auto& priceLevel = sellOrders[message.symbol][message.price];
         auto& orders = orderQueue != nullptr ? *orderQueue : priceLevel.orders;
         if (!orders.empty()) {
-            priceLevel.totalQuantity -= message.quantity;
+            priceLevel.totalQuantity = domain::Quantity{priceLevel.totalQuantity.value() - message.quantity.value()};
             orders.pop();
         }
     }
 
     cleanBook(message);
-    orderIds.erase(message.id);
+    orderIds.erase(message.orderId);
 }
 
 void MatchingEngine::matchBuyOrder(sequencer::sequenceMessage& message) {
-    uint64_t& remaining = message.quantity;
+    domain::Quantity& remaining = message.quantity;
 
-    while (remaining > 0 && sellOrders.contains(message.symbol) && !sellOrders[message.symbol].empty() &&
+    while (remaining.value() > 0 && sellOrders.contains(message.symbol) && !sellOrders[message.symbol].empty() &&
            sellOrders[message.symbol].cbegin()->first <= message.price) {
-        while (remaining > 0 && !sellOrders[message.symbol].begin()->second.orders.empty()) {
+        while (remaining.value() > 0 && !sellOrders[message.symbol].begin()->second.orders.empty()) {
             auto& bestSellLevel = sellOrders[message.symbol].begin()->second;
             auto& bestSellQueue = bestSellLevel.orders;
             auto& bestSell = bestSellQueue.front();
-            uint64_t tradeQty = std::min(remaining, bestSell.quantity);
+            const uint64_t tradeQty = std::min(remaining.value(), bestSell.quantity.value());
 
-            remaining -= tradeQty;
-            bestSell.quantity -= tradeQty;
-            bestSellLevel.totalQuantity -= tradeQty;
+            remaining = domain::Quantity{remaining.value() - tradeQty};
+            bestSell.quantity = domain::Quantity{bestSell.quantity.value() - tradeQty};
+            bestSellLevel.totalQuantity = domain::Quantity{bestSellLevel.totalQuantity.value() - tradeQty};
 
-            if (bestSell.quantity == 0) {
+            if (bestSell.quantity.value() == 0) {
                 removeOrder(bestSell, &bestSellQueue);
                 break;
             }
@@ -218,7 +241,7 @@ void MatchingEngine::matchBuyOrder(sequencer::sequenceMessage& message) {
 }
 
 bool MatchingEngine::canFullyFillBuyOrder(const sequencer::sequenceMessage& message) const {
-    uint64_t remaining = message.quantity;
+    uint64_t remaining = message.quantity.value();
     const auto symbolSellOrders = sellOrders.find(message.symbol);
     if (symbolSellOrders == sellOrders.end()) {
         return false;
@@ -227,7 +250,7 @@ bool MatchingEngine::canFullyFillBuyOrder(const sequencer::sequenceMessage& mess
     for (auto priceLevel = symbolSellOrders->second.cbegin();
          remaining > 0 && priceLevel != symbolSellOrders->second.cend() && priceLevel->first <= message.price;
          ++priceLevel) {
-        const uint64_t availableAtPrice = priceLevel->second.totalQuantity;
+        const uint64_t availableAtPrice = priceLevel->second.totalQuantity.value();
         const uint64_t tradeQty = std::min(remaining, availableAtPrice);
         remaining -= tradeQty;
     }
@@ -235,20 +258,20 @@ bool MatchingEngine::canFullyFillBuyOrder(const sequencer::sequenceMessage& mess
     return remaining == 0;
 }
 
-uint64_t MatchingEngine::calculateBuyRemainder(const sequencer::sequenceMessage& message) const {
-    uint64_t remaining = message.quantity;
+domain::Quantity MatchingEngine::calculateBuyRemainder(const sequencer::sequenceMessage& message) const {
+    uint64_t remaining = message.quantity.value();
     const auto symbolSellOrders = sellOrders.find(message.symbol);
     if (symbolSellOrders == sellOrders.end()) {
-        return remaining;
+        return domain::Quantity{remaining};
     }
 
     for (auto priceLevel = symbolSellOrders->second.cbegin();
          remaining > 0 && priceLevel != symbolSellOrders->second.cend() && priceLevel->first <= message.price;
          ++priceLevel) {
-        const uint64_t tradeQuantity = std::min(remaining, priceLevel->second.totalQuantity);
+        const uint64_t tradeQuantity = std::min(remaining, priceLevel->second.totalQuantity.value());
         remaining -= tradeQuantity;
     }
-    return remaining;
+    return domain::Quantity{remaining};
 }
 
 bool MatchingEngine::cleanBook(const sequencer::sequenceMessage& message) {
@@ -276,22 +299,22 @@ bool MatchingEngine::cleanBook(const sequencer::sequenceMessage& message) {
     return true;
 }
 
-MatchingEngine::ProcessingResult MatchingEngine::processMessage(sequencer::sequenceMessage& message) {
+MatchingEngine::ProcessingOutcome MatchingEngine::processMessage(sequencer::sequenceMessage& message) {
     if (message.type != sequencer::orderType::CANCEL && hasOrderExpired(message.expiry)) {
-        return ProcessingResult::APPLIED;
+        return {ProcessingResult::APPLIED, {}};
     }
 
     switch (message.type) {
         case sequencer::orderType::BUY:
             return processBuyOrder(message);
         case sequencer::orderType::SELL:
-            return processSellOrder(message);
+            return {processSellOrder(message), {}};
 
         case sequencer::orderType::CANCEL:
-            return ProcessingResult::APPLIED;
+            return {ProcessingResult::APPLIED, {}};
 
         case sequencer::orderType::CANCELREJ:
-            return ProcessingResult::APPLIED;
+            return {ProcessingResult::APPLIED, {}};
     }
     throw std::logic_error("unsupported order type reached matching engine");
 }
