@@ -3,6 +3,7 @@
 #include "../../core/task/include/task.hpp"
 #include <chrono>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <sys/types.h>
 #include <thread>
@@ -55,18 +56,16 @@ void MatchingEngine::drainQueue(core::SharedQueue<sequencer::sequenceMessage>& q
     }
 }
 
-MatchingEngine::ProcessingOutcome MatchingEngine::processBuyOrder(sequencer::sequenceMessage& message) {
+MatchingEngine::ProcessingOutcome MatchingEngine::processBuyOrder(const sequencer::sequenceMessage& message) {
+    if (activeOrders.contains(message.orderId)) {
+        throw std::logic_error("duplicate authoritative OrderId reached matching engine");
+    }
+
     switch (message.tif) {
-        case core::task::TimeInForce::IOC: {
-            matchBuyOrder(message);
-            return {ProcessingResult::APPLIED, {}};
-        }
-        case core::task::TimeInForce::FOK: {
-            if (canFullyFillBuyOrder(message)) {
-                matchBuyOrder(message);
-            }
-            return {ProcessingResult::APPLIED, {}};
-        }
+        case core::task::TimeInForce::IOC:
+            return processOrder(message, false, false);
+        case core::task::TimeInForce::FOK:
+            return processOrder(message, false, true);
         case core::task::TimeInForce::GTX: {
             return {ProcessingResult::APPLIED, {}};
         }
@@ -74,29 +73,58 @@ MatchingEngine::ProcessingOutcome MatchingEngine::processBuyOrder(sequencer::seq
             return {ProcessingResult::APPLIED, {}};
         case core::task::TimeInForce::GTC:
         case core::task::TimeInForce::DAY:
-        case core::task::TimeInForce::GTD: {
-            const domain::Quantity prospectiveRemainder = calculateBuyRemainder(message);
-            if (!canAddOrder(message, prospectiveRemainder)) {
-                return rejectBookCapacity(message);
-            }
-            matchBuyOrder(message);
-            if (message.quantity.value() > 0) {
-                const ProcessingResult result = addOrder(message);
-                if (result != ProcessingResult::APPLIED) {
-                    throw std::logic_error("price-level capacity changed during single-writer processing");
-                }
-            }
-            return {ProcessingResult::APPLIED, {}};
-        }
+        case core::task::TimeInForce::GTD:
+            return processOrder(message, true, false);
     }
     throw std::logic_error("unsupported TimeInForce reached matching engine");
 }
 
-void MatchingEngine::matchSellOrder(sequencer::sequenceMessage& message) {}
+MatchingEngine::ProcessingOutcome MatchingEngine::processSellOrder(const sequencer::sequenceMessage& message) {
+    if (activeOrders.contains(message.orderId)) {
+        throw std::logic_error("duplicate authoritative OrderId reached matching engine");
+    }
 
-MatchingEngine::ProcessingResult MatchingEngine::processSellOrder(sequencer::sequenceMessage& message) {
-    matchSellOrder(message);
-    return ProcessingResult::APPLIED;
+    switch (message.tif) {
+        case core::task::TimeInForce::IOC:
+            return processOrder(message, false, false);
+        case core::task::TimeInForce::GTC:
+            return processOrder(message, true, false);
+        case core::task::TimeInForce::FOK:
+        case core::task::TimeInForce::GTX:
+        case core::task::TimeInForce::ATC:
+        case core::task::TimeInForce::DAY:
+        case core::task::TimeInForce::GTD:
+            return {ProcessingResult::APPLIED, {}};
+    }
+    throw std::logic_error("unsupported TimeInForce reached matching engine");
+}
+
+MatchingEngine::ProcessingOutcome MatchingEngine::processOrder(const sequencer::sequenceMessage& message,
+                                                               const bool restRemainder, const bool requireFullFill) {
+    const MatchPlan plan = planMatches(message);
+    if (requireFullFill && plan.remainder.value() > 0) {
+        return {ProcessingResult::APPLIED, {}};
+    }
+    if (restRemainder && !canAddOrder(message, plan.remainder)) {
+        return rejectBookCapacity(message);
+    }
+
+    std::vector<domain::BusinessEvent> events;
+    events.reserve(plan.executionCount);
+
+    domain::Quantity remaining = message.quantity;
+    matchOrder(message, remaining, events);
+    if (remaining != plan.remainder || events.size() != plan.executionCount) {
+        throw std::logic_error("matching result diverged from mutation-free plan");
+    }
+
+    if (restRemainder && remaining.value() > 0) {
+        const ProcessingResult result = addOrder(message, remaining);
+        if (result != ProcessingResult::APPLIED) {
+            throw std::logic_error("price-level capacity changed during single-writer processing");
+        }
+    }
+    return {ProcessingResult::APPLIED, std::move(events)};
 }
 
 bool MatchingEngine::canAddOrder(const sequencer::sequenceMessage& message, const domain::Quantity quantity) const {
@@ -111,19 +139,18 @@ bool MatchingEngine::canAddOrder(const sequencer::sequenceMessage& message, cons
     }
 
     domain::Quantity currentAggregate{};
+    const auto instrument = orderBooks.find(message.instrumentId);
     if (message.type == sequencer::orderType::BUY) {
-        const auto instrument = buyOrders.find(message.symbol);
-        if (instrument != buyOrders.end()) {
-            const auto priceLevel = instrument->second.find(message.price);
-            if (priceLevel != instrument->second.end()) {
+        if (instrument != orderBooks.end()) {
+            const auto priceLevel = instrument->second.bids.find(message.price);
+            if (priceLevel != instrument->second.bids.end()) {
                 currentAggregate = priceLevel->second.totalQuantity;
             }
         }
     } else if (message.type == sequencer::orderType::SELL) {
-        const auto instrument = sellOrders.find(message.symbol);
-        if (instrument != sellOrders.end()) {
-            const auto priceLevel = instrument->second.find(message.price);
-            if (priceLevel != instrument->second.end()) {
+        if (instrument != orderBooks.end()) {
+            const auto priceLevel = instrument->second.asks.find(message.price);
+            if (priceLevel != instrument->second.asks.end()) {
                 currentAggregate = priceLevel->second.totalQuantity;
             }
         }
@@ -156,150 +183,246 @@ MatchingEngine::ProcessingOutcome MatchingEngine::rejectBookCapacity(const seque
     return {ProcessingResult::BOOK_CAPACITY_EXCEEDED, std::move(events)};
 }
 
-MatchingEngine::ProcessingResult MatchingEngine::addOrder(const sequencer::sequenceMessage& message) {
-    if (!canAddOrder(message, message.quantity)) {
+MatchingEngine::ProcessingResult MatchingEngine::addOrder(const sequencer::sequenceMessage& message,
+                                                          const domain::Quantity remainingQuantity) {
+    if (activeOrders.contains(message.orderId)) {
+        throw std::logic_error("duplicate authoritative OrderId reached matching engine");
+    }
+    if (remainingQuantity.value() == 0) {
+        return ProcessingResult::APPLIED;
+    }
+    if (!canAddOrder(message, remainingQuantity)) {
         return ProcessingResult::BOOK_CAPACITY_EXCEEDED;
     }
 
+    auto& instrumentBook = orderBooks[message.instrumentId];
+    PriceLevel* priceLevel = nullptr;
     if (message.type == sequencer::orderType::BUY) {
-        if (!buyOrders.contains(message.symbol)) {
-            buyOrders[message.symbol] = {};
-        }
-        auto& priceLevel = buyOrders[message.symbol][message.price];
-        priceLevel.orders.push(message);
-        priceLevel.totalQuantity = domain::Quantity{priceLevel.totalQuantity.value() + message.quantity.value()};
-
-        orderIds.insert(message.orderId);
+        priceLevel = &instrumentBook.bids[message.price];
     } else if (message.type == sequencer::orderType::SELL) {
-        if (!sellOrders.contains(message.symbol)) {
-            sellOrders[message.symbol] = {};
-        }
-        auto& priceLevel = sellOrders[message.symbol][message.price];
-        priceLevel.orders.push(message);
-        priceLevel.totalQuantity = domain::Quantity{priceLevel.totalQuantity.value() + message.quantity.value()};
+        priceLevel = &instrumentBook.asks[message.price];
+    } else {
+        throw std::logic_error("non-order message cannot rest in the order book");
+    }
 
-        orderIds.insert(message.orderId);
+    priceLevel->orders.push_back(OrderNode{
+        .orderId = message.orderId,
+        .owner = message.clientId,
+        .remainingQuantity = remainingQuantity,
+    });
+    const auto orderLocation = std::prev(priceLevel->orders.end());
+    priceLevel->totalQuantity = domain::Quantity{priceLevel->totalQuantity.value() + remainingQuantity.value()};
+
+    const auto [activeOrder, inserted] =
+        activeOrders.emplace(message.orderId, ActiveOrder{
+                                                  .owner = message.clientId,
+                                                  .instrumentId = message.instrumentId,
+                                                  .side = message.type,
+                                                  .price = message.price,
+                                                  .remainingQuantity = remainingQuantity,
+                                                  .orderLocation = orderLocation,
+                                              });
+    static_cast<void>(activeOrder);
+    if (!inserted) {
+        throw std::logic_error("duplicate authoritative OrderId reached matching engine");
     }
     return ProcessingResult::APPLIED;
 }
 
-bool MatchingEngine::checkOrderExpiry(const sequencer::sequenceMessage& message) {
-    if (hasOrderExpired(message.expiry)) {
-        removeOrder(message);
-        return true;
-    }
-    return false;
-}
-
-void MatchingEngine::removeOrder(const sequencer::sequenceMessage& message,
-                                 std::queue<sequencer::sequenceMessage>* orderQueue) {
-    if (!orderIds.contains(message.orderId)) {
-        return;
-    }
-
+void MatchingEngine::matchOrder(const sequencer::sequenceMessage& message, domain::Quantity& remaining,
+                                std::vector<domain::BusinessEvent>& events) {
     if (message.type == sequencer::orderType::BUY) {
-        auto& priceLevel = buyOrders[message.symbol][message.price];
-        auto& orders = orderQueue != nullptr ? *orderQueue : priceLevel.orders;
-        if (!orders.empty()) {
-            priceLevel.totalQuantity = domain::Quantity{priceLevel.totalQuantity.value() - message.quantity.value()};
-            orders.pop();
-        }
+        matchBuyOrder(message, remaining, events);
     } else if (message.type == sequencer::orderType::SELL) {
-        auto& priceLevel = sellOrders[message.symbol][message.price];
-        auto& orders = orderQueue != nullptr ? *orderQueue : priceLevel.orders;
-        if (!orders.empty()) {
-            priceLevel.totalQuantity = domain::Quantity{priceLevel.totalQuantity.value() - message.quantity.value()};
-            orders.pop();
-        }
+        matchSellOrder(message, remaining, events);
+    } else {
+        throw std::logic_error("non-order message cannot enter matching");
     }
-
-    cleanBook(message);
-    orderIds.erase(message.orderId);
 }
 
-void MatchingEngine::matchBuyOrder(sequencer::sequenceMessage& message) {
-    domain::Quantity& remaining = message.quantity;
+void MatchingEngine::matchBuyOrder(const sequencer::sequenceMessage& message, domain::Quantity& remaining,
+                                   std::vector<domain::BusinessEvent>& events) {
+    while (remaining.value() > 0) {
+        auto instrument = orderBooks.find(message.instrumentId);
+        if (instrument == orderBooks.end() || instrument->second.asks.empty()) {
+            return;
+        }
 
-    while (remaining.value() > 0 && sellOrders.contains(message.symbol) && !sellOrders[message.symbol].empty() &&
-           sellOrders[message.symbol].cbegin()->first <= message.price) {
-        while (remaining.value() > 0 && !sellOrders[message.symbol].begin()->second.orders.empty()) {
-            auto& bestSellLevel = sellOrders[message.symbol].begin()->second;
-            auto& bestSellQueue = bestSellLevel.orders;
-            auto& bestSell = bestSellQueue.front();
-            const uint64_t tradeQty = std::min(remaining.value(), bestSell.quantity.value());
+        auto priceLevel = instrument->second.asks.begin();
+        if (priceLevel->first > message.price) {
+            return;
+        }
+        if (priceLevel->second.orders.empty()) {
+            throw std::logic_error("empty price level remained in order book");
+        }
 
-            remaining = domain::Quantity{remaining.value() - tradeQty};
-            bestSell.quantity = domain::Quantity{bestSell.quantity.value() - tradeQty};
-            bestSellLevel.totalQuantity = domain::Quantity{bestSellLevel.totalQuantity.value() - tradeQty};
+        executeTrade(message, sequencer::orderType::SELL, domain::Side::BUY, priceLevel->first, priceLevel->second,
+                     remaining, events);
+    }
+}
 
-            if (bestSell.quantity.value() == 0) {
-                removeOrder(bestSell, &bestSellQueue);
+void MatchingEngine::matchSellOrder(const sequencer::sequenceMessage& message, domain::Quantity& remaining,
+                                    std::vector<domain::BusinessEvent>& events) {
+    while (remaining.value() > 0) {
+        auto instrument = orderBooks.find(message.instrumentId);
+        if (instrument == orderBooks.end() || instrument->second.bids.empty()) {
+            return;
+        }
+
+        auto priceLevel = instrument->second.bids.begin();
+        if (priceLevel->first < message.price) {
+            return;
+        }
+        if (priceLevel->second.orders.empty()) {
+            throw std::logic_error("empty price level remained in order book");
+        }
+
+        executeTrade(message, sequencer::orderType::BUY, domain::Side::SELL, priceLevel->first, priceLevel->second,
+                     remaining, events);
+    }
+}
+
+void MatchingEngine::executeTrade(const sequencer::sequenceMessage& message, const sequencer::orderType makerSide,
+                                  const domain::Side takerSide, const domain::Price executionPrice,
+                                  PriceLevel& priceLevel, domain::Quantity& remaining,
+                                  std::vector<domain::BusinessEvent>& events) {
+    auto orderLocation = priceLevel.orders.begin();
+    auto activeOrder = activeOrders.find(orderLocation->orderId);
+    if (activeOrder == activeOrders.end() || activeOrder->second.instrumentId != message.instrumentId ||
+        activeOrder->second.side != makerSide || activeOrder->second.price != executionPrice ||
+        activeOrder->second.orderLocation != orderLocation ||
+        activeOrder->second.remainingQuantity != orderLocation->remainingQuantity ||
+        activeOrder->second.owner != orderLocation->owner) {
+        throw std::logic_error("active-order index is inconsistent with resting order node");
+    }
+
+    const uint64_t tradeQuantity = std::min(remaining.value(), orderLocation->remainingQuantity.value());
+    if (tradeQuantity == 0 || tradeQuantity > priceLevel.totalQuantity.value()) {
+        throw std::logic_error("invalid resting quantity or price-level aggregate during matching");
+    }
+
+    const domain::Quantity makerRemaining{orderLocation->remainingQuantity.value() - tradeQuantity};
+    const domain::Quantity takerRemaining{remaining.value() - tradeQuantity};
+    if (events.size() > std::numeric_limits<domain::EventIndex::Underlying>::max()) {
+        throw std::logic_error("EventIndex exhausted during one command");
+    }
+
+    events.emplace_back(domain::Trade{
+        .eventId =
+            domain::EventId{
+                .commandSequence = message.globalSequenceNumber,
+                .eventIndex = domain::EventIndex{static_cast<domain::EventIndex::Underlying>(events.size())},
+            },
+        .instrumentId = message.instrumentId,
+        .makerOrderId = orderLocation->orderId,
+        .makerClientId = orderLocation->owner,
+        .takerOrderId = message.orderId,
+        .takerClientId = message.clientId,
+        .takerSide = takerSide,
+        .executionPrice = executionPrice,
+        .executionQuantity = domain::Quantity{tradeQuantity},
+        .makerRemainingQuantity = makerRemaining,
+        .takerRemainingQuantity = takerRemaining,
+    });
+
+    remaining = takerRemaining;
+    orderLocation->remainingQuantity = makerRemaining;
+    activeOrder->second.remainingQuantity = makerRemaining;
+    priceLevel.totalQuantity = domain::Quantity{priceLevel.totalQuantity.value() - tradeQuantity};
+
+    if (makerRemaining.value() == 0) {
+        removeFilledOrder(activeOrder);
+    }
+}
+
+MatchingEngine::MatchPlan MatchingEngine::planMatches(const sequencer::sequenceMessage& message) const {
+    MatchPlan plan{.remainder = message.quantity, .executionCount = 0};
+    const auto instrument = orderBooks.find(message.instrumentId);
+    if (instrument == orderBooks.end()) {
+        return plan;
+    }
+
+    const auto planBook = [&](const auto& book, const auto isEligible) {
+        for (auto priceLevel = book.cbegin(); plan.remainder.value() > 0 && priceLevel != book.cend(); ++priceLevel) {
+            if (!isEligible(priceLevel->first)) {
                 break;
             }
+            for (const OrderNode& order : priceLevel->second.orders) {
+                if (plan.remainder.value() == 0) {
+                    break;
+                }
+                if (order.remainingQuantity.value() == 0) {
+                    throw std::logic_error("zero-quantity order remained in order book");
+                }
+                const uint64_t tradeQuantity = std::min(plan.remainder.value(), order.remainingQuantity.value());
+                plan.remainder = domain::Quantity{plan.remainder.value() - tradeQuantity};
+                ++plan.executionCount;
+            }
         }
-    }
-}
+    };
 
-bool MatchingEngine::canFullyFillBuyOrder(const sequencer::sequenceMessage& message) const {
-    uint64_t remaining = message.quantity.value();
-    const auto symbolSellOrders = sellOrders.find(message.symbol);
-    if (symbolSellOrders == sellOrders.end()) {
-        return false;
-    }
-
-    for (auto priceLevel = symbolSellOrders->second.cbegin();
-         remaining > 0 && priceLevel != symbolSellOrders->second.cend() && priceLevel->first <= message.price;
-         ++priceLevel) {
-        const uint64_t availableAtPrice = priceLevel->second.totalQuantity.value();
-        const uint64_t tradeQty = std::min(remaining, availableAtPrice);
-        remaining -= tradeQty;
-    }
-
-    return remaining == 0;
-}
-
-domain::Quantity MatchingEngine::calculateBuyRemainder(const sequencer::sequenceMessage& message) const {
-    uint64_t remaining = message.quantity.value();
-    const auto symbolSellOrders = sellOrders.find(message.symbol);
-    if (symbolSellOrders == sellOrders.end()) {
-        return domain::Quantity{remaining};
-    }
-
-    for (auto priceLevel = symbolSellOrders->second.cbegin();
-         remaining > 0 && priceLevel != symbolSellOrders->second.cend() && priceLevel->first <= message.price;
-         ++priceLevel) {
-        const uint64_t tradeQuantity = std::min(remaining, priceLevel->second.totalQuantity.value());
-        remaining -= tradeQuantity;
-    }
-    return domain::Quantity{remaining};
-}
-
-bool MatchingEngine::cleanBook(const sequencer::sequenceMessage& message) {
     if (message.type == sequencer::orderType::BUY) {
-        if (!buyOrders.contains(message.symbol)) {
-            return false;
-        }
-
-        auto& priceMap = buyOrders[message.symbol];
-
-        if (priceMap[message.price].orders.empty()) {
-            priceMap.erase(message.price);
-        }
+        planBook(instrument->second.asks, [&](const domain::Price price) { return price <= message.price; });
     } else if (message.type == sequencer::orderType::SELL) {
-        if (!sellOrders.contains(message.symbol)) {
-            return false;
-        }
-
-        auto& priceMap = sellOrders[message.symbol];
-
-        if (priceMap[message.price].orders.empty()) {
-            priceMap.erase(message.price);
-        }
+        planBook(instrument->second.bids, [&](const domain::Price price) { return price >= message.price; });
+    } else {
+        throw std::logic_error("non-order message cannot plan matching");
     }
-    return true;
+    return plan;
 }
 
-MatchingEngine::ProcessingOutcome MatchingEngine::processMessage(sequencer::sequenceMessage& message) {
+void MatchingEngine::removeFilledOrder(std::map<domain::OrderId, ActiveOrder>::iterator activeOrder) {
+    if (activeOrder == activeOrders.end() || activeOrder->second.remainingQuantity.value() != 0 ||
+        activeOrder->second.orderLocation->remainingQuantity.value() != 0) {
+        throw std::logic_error("only a fully filled active order can use filled-order removal");
+    }
+
+    const domain::InstrumentId instrumentId = activeOrder->second.instrumentId;
+    const sequencer::orderType side = activeOrder->second.side;
+    const domain::Price price = activeOrder->second.price;
+    const OrderList::iterator orderLocation = activeOrder->second.orderLocation;
+
+    auto instrument = orderBooks.find(instrumentId);
+    if (instrument == orderBooks.end()) {
+        throw std::logic_error("active order references a missing instrument book");
+    }
+
+    if (side == sequencer::orderType::BUY) {
+        auto priceLevel = instrument->second.bids.find(price);
+        if (priceLevel == instrument->second.bids.end()) {
+            throw std::logic_error("active order references a missing bid level");
+        }
+        priceLevel->second.orders.erase(orderLocation);
+        activeOrders.erase(activeOrder);
+        if (priceLevel->second.orders.empty()) {
+            if (priceLevel->second.totalQuantity.value() != 0) {
+                throw std::logic_error("empty bid level has non-zero aggregate");
+            }
+            instrument->second.bids.erase(priceLevel);
+        }
+    } else if (side == sequencer::orderType::SELL) {
+        auto priceLevel = instrument->second.asks.find(price);
+        if (priceLevel == instrument->second.asks.end()) {
+            throw std::logic_error("active order references a missing ask level");
+        }
+        priceLevel->second.orders.erase(orderLocation);
+        activeOrders.erase(activeOrder);
+        if (priceLevel->second.orders.empty()) {
+            if (priceLevel->second.totalQuantity.value() != 0) {
+                throw std::logic_error("empty ask level has non-zero aggregate");
+            }
+            instrument->second.asks.erase(priceLevel);
+        }
+    } else {
+        throw std::logic_error("active order has a non-resting side");
+    }
+
+    if (instrument->second.bids.empty() && instrument->second.asks.empty()) {
+        orderBooks.erase(instrument);
+    }
+}
+
+MatchingEngine::ProcessingOutcome MatchingEngine::processMessage(const sequencer::sequenceMessage& message) {
     if (message.type != sequencer::orderType::CANCEL && hasOrderExpired(message.expiry)) {
         return {ProcessingResult::APPLIED, {}};
     }
@@ -308,7 +431,7 @@ MatchingEngine::ProcessingOutcome MatchingEngine::processMessage(sequencer::sequ
         case sequencer::orderType::BUY:
             return processBuyOrder(message);
         case sequencer::orderType::SELL:
-            return {processSellOrder(message), {}};
+            return processSellOrder(message);
 
         case sequencer::orderType::CANCEL:
             return {ProcessingResult::APPLIED, {}};

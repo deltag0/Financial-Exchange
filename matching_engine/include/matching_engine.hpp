@@ -7,10 +7,11 @@
 #include "../../core/task/include/task.hpp"
 #include "../../sequencer/include/sequencer.hpp"
 
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
+#include <list>
 #include <map>
-#include <queue>
-#include <set>
 #include <vector>
 
 namespace exchange::matching_engine {
@@ -33,69 +34,84 @@ protected:
         std::vector<domain::BusinessEvent> events;
     };
 
+    struct MatchPlan {
+        domain::Quantity remainder{};
+        std::size_t executionCount{};
+    };
+
+    struct OrderNode {
+        domain::OrderId orderId{};
+        domain::ClientId owner{};
+        domain::Quantity remainingQuantity{};
+    };
+
+    using OrderList = std::list<OrderNode>;
+
     struct PriceLevel {
         domain::Quantity totalQuantity{};
-        std::queue<sequencer::sequenceMessage> orders;
+        OrderList orders;
+    };
+
+    using BidBook = std::map<domain::Price, PriceLevel, std::greater<domain::Price>>;
+    using AskBook = std::map<domain::Price, PriceLevel>;
+
+    struct InstrumentBook {
+        BidBook bids;
+        AskBook asks;
+    };
+
+    struct ActiveOrder {
+        domain::ClientId owner{};
+        domain::InstrumentId instrumentId{};
+        sequencer::orderType side{};
+        domain::Price price{};
+        domain::Quantity remainingQuantity{};
+        OrderList::iterator orderLocation;
     };
 
     void drainQueues(const char* source);
     void drainQueue(core::SharedQueue<sequencer::sequenceMessage>& queue, const char* source, std::size_t index = 0);
 
-    ProcessingOutcome processMessage(sequencer::sequenceMessage& message);
+    ProcessingOutcome processMessage(const sequencer::sequenceMessage& message);
 
-    /*
-    Match incoming order against existing orders.
+    // Sequenced command data remains immutable; matching operates on a local remainder.
+    ProcessingOutcome processBuyOrder(const sequencer::sequenceMessage& message);
 
-    Must guarantee that message type is BUY before calling.
-    */
-    ProcessingOutcome processBuyOrder(sequencer::sequenceMessage& message);
+    ProcessingOutcome processSellOrder(const sequencer::sequenceMessage& message);
 
-    ProcessingResult processSellOrder(sequencer::sequenceMessage& message);
+    ProcessingOutcome processOrder(const sequencer::sequenceMessage& message, bool restRemainder, bool requireFullFill);
 
-    void matchBuyOrder(sequencer::sequenceMessage& message);
+    void matchOrder(const sequencer::sequenceMessage& message, domain::Quantity& remaining,
+                    std::vector<domain::BusinessEvent>& events);
 
-    void matchSellOrder(sequencer::sequenceMessage& message);
+    void matchBuyOrder(const sequencer::sequenceMessage& message, domain::Quantity& remaining,
+                       std::vector<domain::BusinessEvent>& events);
 
-    /*
-    Returns whether the current sell book can fully fill an incoming buy order.
+    void matchSellOrder(const sequencer::sequenceMessage& message, domain::Quantity& remaining,
+                        std::vector<domain::BusinessEvent>& events);
 
-    Invariants:
-    - Caller provides a BUY order.
-    - This method must not mutate resting orders or the incoming order.
-    */
-    bool canFullyFillBuyOrder(const sequencer::sequenceMessage& message) const;
+    void executeTrade(const sequencer::sequenceMessage& message, sequencer::orderType makerSide, domain::Side takerSide,
+                      domain::Price executionPrice, PriceLevel& priceLevel, domain::Quantity& remaining,
+                      std::vector<domain::BusinessEvent>& events);
 
-    domain::Quantity calculateBuyRemainder(const sequencer::sequenceMessage& message) const;
+    MatchPlan planMatches(const sequencer::sequenceMessage& message) const;
 
     bool canAddOrder(const sequencer::sequenceMessage& message, domain::Quantity quantity) const;
 
     ProcessingOutcome rejectBookCapacity(const sequencer::sequenceMessage& message) const;
 
-    bool cleanBook(const sequencer::sequenceMessage& message);
+    void removeFilledOrder(std::map<domain::OrderId, ActiveOrder>::iterator activeOrder);
 
-    /*
-    Remove first order from the order book.
-    */
-    void removeOrder(const sequencer::sequenceMessage& message,
-                     std::queue<sequencer::sequenceMessage>* orderQueue = nullptr);
-
-    /*
-    Check if order has expired based on current time and order expiry time.
-    */
-    bool checkOrderExpiry(const sequencer::sequenceMessage& message);
-
-    ProcessingResult addOrder(const sequencer::sequenceMessage& message);
+    ProcessingResult addOrder(const sequencer::sequenceMessage& message, domain::Quantity remainingQuantity);
 
     core::SharedQueue<sequencer::sequenceMessage>& sequencerQueue;
 
     // Re-transmission bus for data to ports
     core::Bus& multicastBus;
 
-    std::unordered_map<std::string, std::map<domain::Price, PriceLevel, std::greater<domain::Price>>> buyOrders;
+    std::map<domain::InstrumentId, InstrumentBook> orderBooks;
 
-    std::unordered_map<std::string, std::map<domain::Price, PriceLevel>> sellOrders;
-
-    std::set<domain::OrderId> orderIds;
+    std::map<domain::OrderId, ActiveOrder> activeOrders;
 };
 
 } // namespace exchange::matching_engine
