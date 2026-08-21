@@ -74,6 +74,7 @@ enum class orderType : uint8_t {
 Message format transmitted to the matching engine
 
 id: client-generated unique ID assigned to order
+targetOrderId: authoritative exchange OrderId targeted by a normalized cancel
 globalSequenceNumber: unique ID assigned by the sequencer for each ticker globally
 topicSequenceNumber: unique ID assigned by the sequencer for each ticker and client port combination
 timestamp: timestamp of the order, nanoseconds since epoch
@@ -90,6 +91,7 @@ tif: time in force of the order
 struct sequenceMessage {
     uint64_t id;
     domain::OrderId orderId;
+    std::optional<domain::TargetOrderId> targetOrderId;
     domain::CommandSequence globalSequenceNumber;
     uint64_t topicSequenceNumber;
     uint64_t timestamp;

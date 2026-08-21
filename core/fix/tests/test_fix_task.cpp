@@ -24,6 +24,7 @@ TEST(FixTaskTest, FromAppPushesToQueue) {
     msg.setField(FIX::OrderQty(5));
     msg.setField(FIX::Price(1.23));
     msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
+    msg.setField(FIX::TimeInForce(FIX::TimeInForce_GOOD_TILL_CANCEL));
 
     FIX::SessionID sid("FIX.4.4", "SENDER", "TARGET");
 

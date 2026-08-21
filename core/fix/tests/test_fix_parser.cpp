@@ -1,5 +1,4 @@
 #include "fix_parser.hpp"
-#include <chrono>
 #include <gtest/gtest.h>
 
 using namespace exchange::core::fix;
@@ -21,15 +20,6 @@ FIX::Message makeSpyOrder(const std::string& quantity, const std::string& price)
     return message;
 }
 
-std::chrono::system_clock::time_point atcCloseFor(const std::chrono::system_clock::time_point now) {
-    constexpr int64_t secondsPerDay = 86400;
-    constexpr int64_t atcCloseSeconds = (16 * 60 * 60) + (30 * 60);
-
-    const auto secondsSinceEpoch = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-    const auto currentUtcMidnightSeconds = (secondsSinceEpoch / secondsPerDay) * secondsPerDay;
-    return std::chrono::system_clock::time_point{std::chrono::seconds(currentUtcMidnightSeconds + atcCloseSeconds)};
-}
-
 } // namespace
 
 TEST(FixParserTest, ProcessableTypes) {
@@ -47,7 +37,7 @@ TEST(FixParserTest, ParseNewOrderSingle) {
     msg.setField(FIX::OrderQty(100));
     msg.setField(FIX::Price(12.34));
     msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
-    msg.setField(FIX::TimeInForce('0'));
+    msg.setField(FIX::TimeInForce(FIX::TimeInForce_GOOD_TILL_CANCEL));
 
     FIX::SessionID sid("FIX.4.4", "SENDER", "TARGET");
     auto seq = parseFixMessage(msg, sid, 4);
@@ -58,6 +48,8 @@ TEST(FixParserTest, ParseNewOrderSingle) {
     EXPECT_STREQ(seq.symbol, "SPY");
     EXPECT_EQ(seq.instrumentId.value(), 1u);
     EXPECT_EQ(seq.configurationVersion, 1u);
+    EXPECT_EQ(seq.tif, TimeInForce::GTC);
+    EXPECT_EQ(seq.expiry, std::chrono::system_clock::time_point{});
     ASSERT_TRUE(seq.clientCommandId.has_value());
     EXPECT_EQ(seq.clientCommandId->value(), "ABC123");
     EXPECT_LT(seq.shard_id, 4);
@@ -98,50 +90,13 @@ TEST(FixParserTest, RejectsUnknownInstrumentBeforeSequencing) {
     EXPECT_THROW(parseFixMessage(message, session, 1), FixValidationError);
 }
 
-TEST(FixParserTest, DayOrderMissingExpiryDefaultsToEndOfUtcDay) {
-    FIX::Message msg;
-    msg.getHeader().setField(FIX::MsgType("D"));
-    msg.setField(FIX::ClOrdID("EXP123"));
-    msg.setField(FIX::Symbol("SPY"));
-    msg.setField(FIX::Side(FIX::Side_BUY));
-    msg.setField(FIX::OrderQty(100));
-    msg.setField(FIX::Price(12.34));
-    msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
-    msg.setField(FIX::TimeInForce('0'));
+TEST(FixParserTest, AcceptsIocWithoutExpiry) {
+    FIX::Message message = makeSpyOrder("100", "12.3400");
+    message.setField(FIX::TimeInForce(FIX::TimeInForce_IMMEDIATE_OR_CANCEL));
 
-    FIX::SessionID sid("FIX.4.4", "SENDER", "TARGET");
-    auto before = std::chrono::system_clock::now();
-    auto seq = parseFixMessage(msg, sid, 4);
-    auto after = std::chrono::system_clock::now();
+    const FIX::SessionID session("FIX.4.4", "SENDER", "TARGET");
+    const auto sequence = parseFixMessage(message, session, 4);
 
-    auto beforeSeconds = std::chrono::duration_cast<std::chrono::seconds>(before.time_since_epoch()).count();
-    auto afterSeconds = std::chrono::duration_cast<std::chrono::seconds>(after.time_since_epoch()).count();
-    auto minExpected =
-        std::chrono::system_clock::time_point{std::chrono::seconds(((beforeSeconds / 86400) + 1) * 86400)};
-    auto maxExpected =
-        std::chrono::system_clock::time_point{std::chrono::seconds(((afterSeconds / 86400) + 1) * 86400)};
-
-    EXPECT_GE(seq.expiry, minExpected);
-    EXPECT_LE(seq.expiry, maxExpected);
-}
-
-TEST(FixParserTest, AtcOrderDefaultsToSameUtcDayClose) {
-    FIX::Message msg;
-    msg.getHeader().setField(FIX::MsgType("D"));
-    msg.setField(FIX::ClOrdID("ATC123"));
-    msg.setField(FIX::Symbol("SPY"));
-    msg.setField(FIX::Side(FIX::Side_BUY));
-    msg.setField(FIX::OrderQty(100));
-    msg.setField(FIX::Price(12.34));
-    msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
-    msg.setField(FIX::TimeInForce(FIX::TimeInForce_AT_THE_CLOSE));
-
-    FIX::SessionID sid("FIX.4.4", "SENDER", "TARGET");
-    const auto before = std::chrono::system_clock::now();
-    const auto seq = parseFixMessage(msg, sid, 4);
-    const auto after = std::chrono::system_clock::now();
-
-    EXPECT_EQ(seq.tif, TimeInForce::ATC);
-    EXPECT_GE(seq.expiry, atcCloseFor(before));
-    EXPECT_LE(seq.expiry, atcCloseFor(after));
+    EXPECT_EQ(sequence.tif, TimeInForce::IOC);
+    EXPECT_EQ(sequence.expiry, std::chrono::system_clock::time_point{});
 }

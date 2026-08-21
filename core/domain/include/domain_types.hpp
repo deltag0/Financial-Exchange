@@ -32,6 +32,7 @@ private:
 
 struct CommandSequenceTag;
 struct OrderIdTag;
+struct TargetOrderIdTag;
 struct ClientIdTag;
 struct InstrumentIdTag;
 struct EventIndexTag;
@@ -40,6 +41,7 @@ struct QuantityTag;
 
 using CommandSequence = StrongUnsigned<CommandSequenceTag, std::uint64_t>;
 using OrderId = StrongUnsigned<OrderIdTag, std::uint64_t>;
+using TargetOrderId = StrongUnsigned<TargetOrderIdTag, std::uint64_t>;
 using ClientId = StrongUnsigned<ClientIdTag, std::uint64_t>;
 using InstrumentId = StrongUnsigned<InstrumentIdTag, std::uint64_t>;
 using EventIndex = StrongUnsigned<EventIndexTag, std::uint32_t>;
@@ -48,6 +50,10 @@ using Quantity = StrongUnsigned<QuantityTag, std::uint64_t>;
 
 [[nodiscard]] constexpr OrderId orderIdFrom(const CommandSequence commandSequence) noexcept {
     return OrderId{commandSequence.value()};
+}
+
+[[nodiscard]] constexpr OrderId orderIdFrom(const TargetOrderId targetOrderId) noexcept {
+    return OrderId{targetOrderId.value()};
 }
 
 class ClientCommandId final {
@@ -80,6 +86,7 @@ private:
 };
 
 static_assert(std::is_trivially_copyable_v<CommandSequence>);
+static_assert(std::is_trivially_copyable_v<TargetOrderId>);
 static_assert(std::is_trivially_copyable_v<ClientCommandId>);
 static_assert(!std::is_convertible_v<Price, Quantity>);
 static_assert(!std::is_convertible_v<Quantity, Price>);

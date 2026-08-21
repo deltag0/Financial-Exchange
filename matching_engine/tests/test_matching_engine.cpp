@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <array>
+#include <chrono>
 #include <string>
 #include <type_traits>
 
@@ -28,6 +30,12 @@ public:
     Outcome invokeProcessSellOrder(const sequencer::sequenceMessage& message) {
         return processSellOrder(message);
     }
+    Outcome invokeProcessCancel(const sequencer::sequenceMessage& message) {
+        return processCancel(message);
+    }
+    Outcome invokeProcessMessage(const sequencer::sequenceMessage& message) {
+        return processMessage(message);
+    }
     uint64_t bestBuyLevelQuantity(domain::InstrumentId instrumentId) const {
         return orderBooks.at(instrumentId).bids.begin()->second.totalQuantity.value();
     }
@@ -48,6 +56,17 @@ public:
     }
     uint64_t buyLevelQuantity(domain::InstrumentId instrumentId, domain::Price price) const {
         return orderBooks.at(instrumentId).bids.at(price).totalQuantity.value();
+    }
+    std::size_t sellLevelOrderCount(domain::InstrumentId instrumentId, domain::Price price) const {
+        return orderBooks.at(instrumentId).asks.at(price).orders.size();
+    }
+    bool hasBuyLevel(domain::InstrumentId instrumentId, domain::Price price) const {
+        const auto instrument = orderBooks.find(instrumentId);
+        return instrument != orderBooks.end() && instrument->second.bids.contains(price);
+    }
+    bool hasSellLevel(domain::InstrumentId instrumentId, domain::Price price) const {
+        const auto instrument = orderBooks.find(instrumentId);
+        return instrument != orderBooks.end() && instrument->second.asks.contains(price);
     }
     bool hasInstrument(domain::InstrumentId instrumentId) const {
         return orderBooks.contains(instrumentId);
@@ -117,7 +136,22 @@ sequencer::sequenceMessage makeOrder(uint64_t id, sequencer::orderType type, con
     return message;
 }
 
+sequencer::sequenceMessage makeCancel(uint64_t commandSequence, uint64_t clientId, uint64_t targetOrderId,
+                                      domain::InstrumentId instrumentId = domain::InstrumentId{1}) {
+    sequencer::sequenceMessage message{};
+    message.id = commandSequence;
+    message.globalSequenceNumber = domain::CommandSequence{commandSequence};
+    message.clientId = domain::ClientId{clientId};
+    message.clientCommandId.emplace("CANCEL-" + std::to_string(commandSequence));
+    message.instrumentId = instrumentId;
+    message.targetOrderId.emplace(domain::TargetOrderId{targetOrderId});
+    message.type = sequencer::orderType::CANCEL;
+    return message;
+}
+
 static_assert(!std::is_same_v<domain::Price, domain::Quantity>);
+static_assert(!std::is_same_v<domain::OrderId, domain::TargetOrderId>);
+static_assert(!std::is_convertible_v<domain::TargetOrderId, domain::OrderId>);
 static_assert(!std::is_same_v<domain::AdmissionRejectionReason, domain::CommandRejectionReason>);
 static_assert(!std::is_convertible_v<domain::AdmissionRejectionReason, domain::CommandRejectionReason>);
 static_assert(std::is_same_v<decltype(domain::CommandRejected::reason), const domain::CommandRejectionReason>);
@@ -175,20 +209,35 @@ TEST(MatchingEngineTest, ProcessOnceEmptyDoesNothing) {
     EXPECT_TRUE(seq_q.empty());
 }
 
-TEST(MatchingEngineTest, FokBuyDoesNotReuseSameRestingOrderInAvailabilityCheck) {
+TEST(MatchingEngineTest, UnsupportedTimeInForceIsInvariantFailureWithoutMutationForBothSides) {
     core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
     core::Bus bus(8);
     TestableMatchingEngine engine(&seq_q, bus);
 
-    auto restingSell = makeOrder(1, sequencer::orderType::SELL, "SPY", 100, 100, core::task::TimeInForce::DAY);
-    engine.invokeAddOrder(restingSell);
+    ASSERT_EQ(
+        engine.invokeAddOrder(makeOrder(1, sequencer::orderType::SELL, "SPY", 110, 100, core::task::TimeInForce::GTC)),
+        TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(
+        engine.invokeAddOrder(makeOrder(2, sequencer::orderType::BUY, "SPY", 90, 100, core::task::TimeInForce::GTC)),
+        TestableMatchingEngine::Result::APPLIED);
 
-    auto fokBuy = makeOrder(2, sequencer::orderType::BUY, "SPY", 100, 250, core::task::TimeInForce::FOK);
-    EXPECT_EQ(engine.invokeProcessBuyOrder(fokBuy).result, TestableMatchingEngine::Result::APPLIED);
+    constexpr std::array unsupported{core::task::TimeInForce::DAY, core::task::TimeInForce::FOK,
+                                     core::task::TimeInForce::GTD, core::task::TimeInForce::GTX,
+                                     core::task::TimeInForce::ATC, static_cast<core::task::TimeInForce>('Z')};
+    uint64_t orderId = 10;
+    for (const core::task::TimeInForce timeInForce : unsupported) {
+        auto buy = makeOrder(orderId++, sequencer::orderType::BUY, "SPY", 110, 25, timeInForce);
+        auto sell = makeOrder(orderId++, sequencer::orderType::SELL, "SPY", 90, 25, timeInForce);
+        buy.expiry = std::chrono::system_clock::time_point{std::chrono::seconds{1}};
+        sell.expiry = std::chrono::system_clock::time_point{std::chrono::seconds{1}};
+        EXPECT_THROW(engine.invokeProcessMessage(buy), std::logic_error);
+        EXPECT_THROW(engine.invokeProcessMessage(sell), std::logic_error);
+    }
 
-    EXPECT_EQ(fokBuy.quantity.value(), 250);
-    EXPECT_EQ(engine.bestSellQuantity(domain::InstrumentId{1}), 100);
-    EXPECT_EQ(engine.bestSellLevelQuantity(domain::InstrumentId{1}), 100);
+    EXPECT_EQ(engine.activeRemainingQuantity(domain::OrderId{1}), 100u);
+    EXPECT_EQ(engine.activeRemainingQuantity(domain::OrderId{2}), 100u);
+    EXPECT_EQ(engine.bestSellLevelQuantity(domain::InstrumentId{1}), 100u);
+    EXPECT_EQ(engine.bestBuyLevelQuantity(domain::InstrumentId{1}), 100u);
     EXPECT_TRUE(engine.stateIsConsistent());
 }
 
@@ -197,7 +246,7 @@ TEST(MatchingEngineTest, PartialFillUpdatesNodeAggregateAndActiveIndex) {
     core::Bus bus(8);
     TestableMatchingEngine engine(&seq_q, bus);
 
-    auto restingSell = makeOrder(1, sequencer::orderType::SELL, "SPY", 100, 100, core::task::TimeInForce::DAY);
+    auto restingSell = makeOrder(1, sequencer::orderType::SELL, "SPY", 100, 100, core::task::TimeInForce::GTC);
     engine.invokeAddOrder(restingSell);
 
     auto buy = makeOrder(2, sequencer::orderType::BUY, "SPY", 100, 40, core::task::TimeInForce::IOC);
@@ -347,7 +396,10 @@ TEST(MatchingEngineTest, InstrumentIdIsAuthoritativeForMatchingAndSymbolsDoNotCr
 
     auto otherInstrumentBuy = makeOrder(2, sequencer::orderType::BUY, "LEGACY", 100, 50, core::task::TimeInForce::IOC,
                                         domain::InstrumentId{2});
-    ASSERT_EQ(engine.invokeProcessBuyOrder(otherInstrumentBuy).result, TestableMatchingEngine::Result::APPLIED);
+    const auto isolatedOutcome = engine.invokeProcessBuyOrder(otherInstrumentBuy);
+    ASSERT_EQ(isolatedOutcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(isolatedOutcome.events.size(), 1u);
+    EXPECT_NE(std::get_if<domain::OrderCancelled>(&isolatedOutcome.events.front()), nullptr);
     EXPECT_EQ(otherInstrumentBuy.quantity.value(), 50u);
     EXPECT_EQ(engine.activeRemainingQuantity(domain::OrderId{1}), 50u);
 
@@ -548,13 +600,24 @@ TEST(MatchingEngineTest, SellGtcRemainderRestsWithPostTradeQuantity) {
     const TestableMatchingEngine::Outcome outcome = engine.invokeProcessSellOrder(incomingSell);
 
     ASSERT_EQ(outcome.result, TestableMatchingEngine::Result::APPLIED);
-    ASSERT_EQ(outcome.events.size(), 1u);
+    ASSERT_EQ(outcome.events.size(), 2u);
     const auto* trade = std::get_if<domain::Trade>(&outcome.events.front());
+    const auto* rested = std::get_if<domain::OrderRested>(&outcome.events[1]);
     ASSERT_NE(trade, nullptr);
+    ASSERT_NE(rested, nullptr);
     EXPECT_EQ(trade->executionPrice, domain::Price{101});
     EXPECT_EQ(trade->executionQuantity, domain::Quantity{40});
     EXPECT_EQ(trade->makerRemainingQuantity, domain::Quantity{0});
     EXPECT_EQ(trade->takerRemainingQuantity, domain::Quantity{60});
+    EXPECT_EQ(*rested, (domain::OrderRested{
+                           .eventId = domain::EventId{domain::CommandSequence{2}, domain::EventIndex{1}},
+                           .orderId = domain::OrderId{2},
+                           .clientId = domain::ClientId{1002},
+                           .instrumentId = domain::InstrumentId{1},
+                           .side = domain::Side::SELL,
+                           .price = domain::Price{100},
+                           .remainingQuantity = domain::Quantity{60},
+                       }));
     EXPECT_EQ(incomingSell.quantity.value(), 100u);
     EXPECT_FALSE(engine.isActive(domain::OrderId{1}));
     EXPECT_TRUE(engine.isActive(domain::OrderId{2}));
@@ -576,13 +639,24 @@ TEST(MatchingEngineTest, BuyGtcRemainderRestsWithPostTradeQuantity) {
     const TestableMatchingEngine::Outcome outcome = engine.invokeProcessBuyOrder(incomingBuy);
 
     ASSERT_EQ(outcome.result, TestableMatchingEngine::Result::APPLIED);
-    ASSERT_EQ(outcome.events.size(), 1u);
+    ASSERT_EQ(outcome.events.size(), 2u);
     const auto* trade = std::get_if<domain::Trade>(&outcome.events.front());
+    const auto* rested = std::get_if<domain::OrderRested>(&outcome.events[1]);
     ASSERT_NE(trade, nullptr);
+    ASSERT_NE(rested, nullptr);
     EXPECT_EQ(trade->executionPrice, domain::Price{99});
     EXPECT_EQ(trade->executionQuantity, domain::Quantity{40});
     EXPECT_EQ(trade->makerRemainingQuantity, domain::Quantity{0});
     EXPECT_EQ(trade->takerRemainingQuantity, domain::Quantity{60});
+    EXPECT_EQ(*rested, (domain::OrderRested{
+                           .eventId = domain::EventId{domain::CommandSequence{2}, domain::EventIndex{1}},
+                           .orderId = domain::OrderId{2},
+                           .clientId = domain::ClientId{1002},
+                           .instrumentId = domain::InstrumentId{1},
+                           .side = domain::Side::BUY,
+                           .price = domain::Price{100},
+                           .remainingQuantity = domain::Quantity{60},
+                       }));
     EXPECT_EQ(incomingBuy.quantity.value(), 100u);
     EXPECT_FALSE(engine.isActive(domain::OrderId{1}));
     EXPECT_TRUE(engine.isActive(domain::OrderId{2}));
@@ -604,13 +678,23 @@ TEST(MatchingEngineTest, SelfTradingIsAllowedAndIocRemainderDoesNotRest) {
     const TestableMatchingEngine::Outcome outcome = engine.invokeProcessSellOrder(incomingSell);
 
     ASSERT_EQ(outcome.result, TestableMatchingEngine::Result::APPLIED);
-    ASSERT_EQ(outcome.events.size(), 1u);
+    ASSERT_EQ(outcome.events.size(), 2u);
     const auto* trade = std::get_if<domain::Trade>(&outcome.events.front());
+    const auto* cancelled = std::get_if<domain::OrderCancelled>(&outcome.events[1]);
     ASSERT_NE(trade, nullptr);
+    ASSERT_NE(cancelled, nullptr);
     EXPECT_EQ(trade->makerClientId, restingBuy.clientId);
     EXPECT_EQ(trade->takerClientId, restingBuy.clientId);
     EXPECT_EQ(trade->executionQuantity, domain::Quantity{50});
     EXPECT_EQ(trade->takerRemainingQuantity, domain::Quantity{20});
+    EXPECT_EQ(*cancelled, (domain::OrderCancelled{
+                              .eventId = domain::EventId{domain::CommandSequence{2}, domain::EventIndex{1}},
+                              .orderId = domain::OrderId{2},
+                              .clientId = restingBuy.clientId,
+                              .instrumentId = domain::InstrumentId{1},
+                              .cancelledQuantity = domain::Quantity{20},
+                              .reason = domain::CancelReason::IOC_REMAINDER,
+                          }));
     EXPECT_FALSE(engine.isActive(domain::OrderId{1}));
     EXPECT_FALSE(engine.isActive(domain::OrderId{2}));
     EXPECT_FALSE(engine.hasInstrument(domain::InstrumentId{1}));
@@ -629,7 +713,8 @@ TEST(MatchingEngineTest, SellMatchingIsIsolatedByInstrumentIdAndIgnoresLegacySym
     const auto otherInstrumentSell = makeOrder(2, sequencer::orderType::SELL, "LEGACY", 100, 50,
                                                core::task::TimeInForce::IOC, domain::InstrumentId{2});
     const TestableMatchingEngine::Outcome isolatedOutcome = engine.invokeProcessSellOrder(otherInstrumentSell);
-    EXPECT_TRUE(isolatedOutcome.events.empty());
+    ASSERT_EQ(isolatedOutcome.events.size(), 1u);
+    EXPECT_NE(std::get_if<domain::OrderCancelled>(&isolatedOutcome.events.front()), nullptr);
     EXPECT_EQ(engine.activeRemainingQuantity(domain::OrderId{1}), 50u);
 
     const auto sameInstrumentSell = makeOrder(3, sequencer::orderType::SELL, "RENAMED", 100, 50,
@@ -639,6 +724,174 @@ TEST(MatchingEngineTest, SellMatchingIsIsolatedByInstrumentIdAndIgnoresLegacySym
     EXPECT_NE(std::get_if<domain::Trade>(&matchingOutcome.events.front()), nullptr);
     EXPECT_FALSE(engine.isActive(domain::OrderId{1}));
     EXPECT_TRUE(engine.stateIsConsistent());
+}
+
+TEST(MatchingEngineTest, UnmatchedGtcOrdersRestAndEmitExactTerminalEventsForBothSides) {
+    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
+    core::Bus bus(8);
+    TestableMatchingEngine engine(&seq_q, bus);
+
+    const auto buy = makeOrder(1, sequencer::orderType::BUY, "SPY", 99, 25, core::task::TimeInForce::GTC);
+    const TestableMatchingEngine::Outcome buyOutcome = engine.invokeProcessBuyOrder(buy);
+    ASSERT_EQ(buyOutcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(buyOutcome.events.size(), 1u);
+    const auto* buyRested = std::get_if<domain::OrderRested>(&buyOutcome.events.front());
+    ASSERT_NE(buyRested, nullptr);
+    EXPECT_EQ(*buyRested, (domain::OrderRested{
+                              .eventId = domain::EventId{domain::CommandSequence{1}, domain::EventIndex{0}},
+                              .orderId = domain::OrderId{1},
+                              .clientId = domain::ClientId{1001},
+                              .instrumentId = domain::InstrumentId{1},
+                              .side = domain::Side::BUY,
+                              .price = domain::Price{99},
+                              .remainingQuantity = domain::Quantity{25},
+                          }));
+
+    const auto sell = makeOrder(2, sequencer::orderType::SELL, "SPY", 101, 30, core::task::TimeInForce::GTC);
+    const TestableMatchingEngine::Outcome sellOutcome = engine.invokeProcessSellOrder(sell);
+    ASSERT_EQ(sellOutcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(sellOutcome.events.size(), 1u);
+    const auto* sellRested = std::get_if<domain::OrderRested>(&sellOutcome.events.front());
+    ASSERT_NE(sellRested, nullptr);
+    EXPECT_EQ(*sellRested, (domain::OrderRested{
+                               .eventId = domain::EventId{domain::CommandSequence{2}, domain::EventIndex{0}},
+                               .orderId = domain::OrderId{2},
+                               .clientId = domain::ClientId{1002},
+                               .instrumentId = domain::InstrumentId{1},
+                               .side = domain::Side::SELL,
+                               .price = domain::Price{101},
+                               .remainingQuantity = domain::Quantity{30},
+                           }));
+
+    EXPECT_EQ(buy.quantity, domain::Quantity{25});
+    EXPECT_EQ(sell.quantity, domain::Quantity{30});
+    EXPECT_EQ(engine.activeRemainingQuantity(domain::OrderId{1}), 25u);
+    EXPECT_EQ(engine.activeRemainingQuantity(domain::OrderId{2}), 30u);
+    EXPECT_EQ(engine.buyLevelQuantity(domain::InstrumentId{1}, domain::Price{99}), 25u);
+    EXPECT_EQ(engine.sellLevelQuantity(domain::InstrumentId{1}, domain::Price{101}), 30u);
+    EXPECT_TRUE(engine.stateIsConsistent());
+}
+
+TEST(MatchingEngineTest, UnmatchedIocOrdersCancelExactlyAndNeverRestForBothSides) {
+    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
+    core::Bus bus(8);
+    TestableMatchingEngine engine(&seq_q, bus);
+
+    const auto buy = makeOrder(1, sequencer::orderType::BUY, "SPY", 99, 25, core::task::TimeInForce::IOC);
+    const TestableMatchingEngine::Outcome buyOutcome = engine.invokeProcessBuyOrder(buy);
+    ASSERT_EQ(buyOutcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(buyOutcome.events.size(), 1u);
+    const auto* buyCancelled = std::get_if<domain::OrderCancelled>(&buyOutcome.events.front());
+    ASSERT_NE(buyCancelled, nullptr);
+    EXPECT_EQ(*buyCancelled, (domain::OrderCancelled{
+                                 .eventId = domain::EventId{domain::CommandSequence{1}, domain::EventIndex{0}},
+                                 .orderId = domain::OrderId{1},
+                                 .clientId = domain::ClientId{1001},
+                                 .instrumentId = domain::InstrumentId{1},
+                                 .cancelledQuantity = domain::Quantity{25},
+                                 .reason = domain::CancelReason::IOC_REMAINDER,
+                             }));
+
+    const auto sell = makeOrder(2, sequencer::orderType::SELL, "SPY", 101, 30, core::task::TimeInForce::IOC);
+    const TestableMatchingEngine::Outcome sellOutcome = engine.invokeProcessSellOrder(sell);
+    ASSERT_EQ(sellOutcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(sellOutcome.events.size(), 1u);
+    const auto* sellCancelled = std::get_if<domain::OrderCancelled>(&sellOutcome.events.front());
+    ASSERT_NE(sellCancelled, nullptr);
+    EXPECT_EQ(*sellCancelled, (domain::OrderCancelled{
+                                  .eventId = domain::EventId{domain::CommandSequence{2}, domain::EventIndex{0}},
+                                  .orderId = domain::OrderId{2},
+                                  .clientId = domain::ClientId{1002},
+                                  .instrumentId = domain::InstrumentId{1},
+                                  .cancelledQuantity = domain::Quantity{30},
+                                  .reason = domain::CancelReason::IOC_REMAINDER,
+                              }));
+
+    EXPECT_EQ(buy.quantity, domain::Quantity{25});
+    EXPECT_EQ(sell.quantity, domain::Quantity{30});
+    EXPECT_FALSE(engine.isActive(domain::OrderId{1}));
+    EXPECT_FALSE(engine.isActive(domain::OrderId{2}));
+    EXPECT_FALSE(engine.hasInstrument(domain::InstrumentId{1}));
+    EXPECT_TRUE(engine.stateIsConsistent());
+}
+
+TEST(MatchingEngineTest, BuyIocPartialFillEmitsTradeThenExactCancellation) {
+    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
+    core::Bus bus(8);
+    TestableMatchingEngine engine(&seq_q, bus);
+
+    ASSERT_EQ(
+        engine.invokeAddOrder(makeOrder(1, sequencer::orderType::SELL, "SPY", 99, 20, core::task::TimeInForce::GTC)),
+        TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(
+        engine.invokeAddOrder(makeOrder(2, sequencer::orderType::SELL, "SPY", 99, 30, core::task::TimeInForce::GTC)),
+        TestableMatchingEngine::Result::APPLIED);
+    const auto incomingBuy = makeOrder(3, sequencer::orderType::BUY, "SPY", 100, 100, core::task::TimeInForce::IOC);
+    const TestableMatchingEngine::Outcome outcome = engine.invokeProcessBuyOrder(incomingBuy);
+
+    ASSERT_EQ(outcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(outcome.events.size(), 3u);
+    const auto* firstTrade = std::get_if<domain::Trade>(&outcome.events[0]);
+    const auto* secondTrade = std::get_if<domain::Trade>(&outcome.events[1]);
+    const auto* cancelled = std::get_if<domain::OrderCancelled>(&outcome.events[2]);
+    ASSERT_NE(firstTrade, nullptr);
+    ASSERT_NE(secondTrade, nullptr);
+    ASSERT_NE(cancelled, nullptr);
+    EXPECT_EQ(firstTrade->eventId, (domain::EventId{domain::CommandSequence{3}, domain::EventIndex{0}}));
+    EXPECT_EQ(firstTrade->executionQuantity, domain::Quantity{20});
+    EXPECT_EQ(firstTrade->takerRemainingQuantity, domain::Quantity{80});
+    EXPECT_EQ(secondTrade->eventId, (domain::EventId{domain::CommandSequence{3}, domain::EventIndex{1}}));
+    EXPECT_EQ(secondTrade->executionQuantity, domain::Quantity{30});
+    EXPECT_EQ(secondTrade->takerRemainingQuantity, domain::Quantity{50});
+    EXPECT_EQ(*cancelled, (domain::OrderCancelled{
+                              .eventId = domain::EventId{domain::CommandSequence{3}, domain::EventIndex{2}},
+                              .orderId = domain::OrderId{3},
+                              .clientId = domain::ClientId{1003},
+                              .instrumentId = domain::InstrumentId{1},
+                              .cancelledQuantity = domain::Quantity{50},
+                              .reason = domain::CancelReason::IOC_REMAINDER,
+                          }));
+    EXPECT_EQ(incomingBuy.quantity, domain::Quantity{100});
+    EXPECT_FALSE(engine.isActive(domain::OrderId{1}));
+    EXPECT_FALSE(engine.isActive(domain::OrderId{2}));
+    EXPECT_FALSE(engine.isActive(domain::OrderId{3}));
+    EXPECT_FALSE(engine.hasInstrument(domain::InstrumentId{1}));
+    EXPECT_TRUE(engine.stateIsConsistent());
+}
+
+TEST(MatchingEngineTest, FullyFilledGtcOrdersEmitOnlyTradesForBothSides) {
+    {
+        core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
+        core::Bus bus(8);
+        TestableMatchingEngine engine(&seq_q, bus);
+        ASSERT_EQ(engine.invokeAddOrder(
+                      makeOrder(1, sequencer::orderType::SELL, "SPY", 99, 40, core::task::TimeInForce::GTC)),
+                  TestableMatchingEngine::Result::APPLIED);
+        const auto buy = makeOrder(2, sequencer::orderType::BUY, "SPY", 100, 40, core::task::TimeInForce::GTC);
+        const auto outcome = engine.invokeProcessBuyOrder(buy);
+        ASSERT_EQ(outcome.events.size(), 1u);
+        EXPECT_NE(std::get_if<domain::Trade>(&outcome.events.front()), nullptr);
+        EXPECT_EQ(buy.quantity, domain::Quantity{40});
+        EXPECT_FALSE(engine.isActive(domain::OrderId{1}));
+        EXPECT_FALSE(engine.isActive(domain::OrderId{2}));
+        EXPECT_TRUE(engine.stateIsConsistent());
+    }
+    {
+        core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
+        core::Bus bus(8);
+        TestableMatchingEngine engine(&seq_q, bus);
+        ASSERT_EQ(engine.invokeAddOrder(
+                      makeOrder(1, sequencer::orderType::BUY, "SPY", 101, 40, core::task::TimeInForce::GTC)),
+                  TestableMatchingEngine::Result::APPLIED);
+        const auto sell = makeOrder(2, sequencer::orderType::SELL, "SPY", 100, 40, core::task::TimeInForce::GTC);
+        const auto outcome = engine.invokeProcessSellOrder(sell);
+        ASSERT_EQ(outcome.events.size(), 1u);
+        EXPECT_NE(std::get_if<domain::Trade>(&outcome.events.front()), nullptr);
+        EXPECT_EQ(sell.quantity, domain::Quantity{40});
+        EXPECT_FALSE(engine.isActive(domain::OrderId{1}));
+        EXPECT_FALSE(engine.isActive(domain::OrderId{2}));
+        EXPECT_TRUE(engine.stateIsConsistent());
+    }
 }
 
 TEST(MatchingEngineTest, SellCapacityPreflightRejectsBeforeCrossingBidMutation) {
@@ -673,4 +926,318 @@ TEST(MatchingEngineTest, SellCapacityPreflightRejectsBeforeCrossingBidMutation) 
     EXPECT_EQ(engine.bestBuyLevelQuantity(domain::InstrumentId{1}), 1u);
     EXPECT_TRUE(engine.isActive(domain::OrderId{11}));
     EXPECT_TRUE(engine.stateIsConsistent());
+}
+
+TEST(MatchingEngineCancellationTest, SuccessfulBuyAndSellCancellationEmitExactEventsAndCleanEmptyState) {
+    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
+    core::Bus bus(8);
+    TestableMatchingEngine engine(&seq_q, bus);
+
+    ASSERT_EQ(
+        engine.invokeAddOrder(makeOrder(1, sequencer::orderType::BUY, "SPY", 99, 40, core::task::TimeInForce::GTC)),
+        TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(
+        engine.invokeAddOrder(makeOrder(2, sequencer::orderType::SELL, "SPY", 101, 60, core::task::TimeInForce::GTC)),
+        TestableMatchingEngine::Result::APPLIED);
+
+    const auto cancelBuy = makeCancel(3, 1001, 1);
+    const auto buyOutcome = engine.invokeProcessCancel(cancelBuy);
+    ASSERT_EQ(buyOutcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(buyOutcome.events.size(), 1u);
+    const auto* buyCancelled = std::get_if<domain::OrderCancelled>(&buyOutcome.events.front());
+    ASSERT_NE(buyCancelled, nullptr);
+    EXPECT_EQ(*buyCancelled, (domain::OrderCancelled{
+                                 .eventId = domain::EventId{domain::CommandSequence{3}, domain::EventIndex{0}},
+                                 .orderId = domain::OrderId{1},
+                                 .clientId = domain::ClientId{1001},
+                                 .instrumentId = domain::InstrumentId{1},
+                                 .cancelledQuantity = domain::Quantity{40},
+                                 .reason = domain::CancelReason::CLIENT_REQUESTED,
+                             }));
+    EXPECT_EQ(cancelBuy.targetOrderId, std::optional<domain::TargetOrderId>{domain::TargetOrderId{1}});
+    EXPECT_FALSE(engine.isActive(domain::OrderId{1}));
+    EXPECT_FALSE(engine.hasBuyLevel(domain::InstrumentId{1}, domain::Price{99}));
+    EXPECT_TRUE(engine.hasInstrument(domain::InstrumentId{1}));
+
+    const auto cancelSell = makeCancel(4, 1002, 2);
+    const auto sellOutcome = engine.invokeProcessCancel(cancelSell);
+    ASSERT_EQ(sellOutcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(sellOutcome.events.size(), 1u);
+    const auto* sellCancelled = std::get_if<domain::OrderCancelled>(&sellOutcome.events.front());
+    ASSERT_NE(sellCancelled, nullptr);
+    EXPECT_EQ(*sellCancelled, (domain::OrderCancelled{
+                                  .eventId = domain::EventId{domain::CommandSequence{4}, domain::EventIndex{0}},
+                                  .orderId = domain::OrderId{2},
+                                  .clientId = domain::ClientId{1002},
+                                  .instrumentId = domain::InstrumentId{1},
+                                  .cancelledQuantity = domain::Quantity{60},
+                                  .reason = domain::CancelReason::CLIENT_REQUESTED,
+                              }));
+    EXPECT_FALSE(engine.isActive(domain::OrderId{2}));
+    EXPECT_FALSE(engine.hasInstrument(domain::InstrumentId{1}));
+    EXPECT_TRUE(engine.stateIsConsistent());
+}
+
+TEST(MatchingEngineCancellationTest, CancellingMiddleSellPreservesUnaffectedFifoAndAggregate) {
+    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
+    core::Bus bus(8);
+    TestableMatchingEngine engine(&seq_q, bus);
+
+    ASSERT_EQ(
+        engine.invokeAddOrder(makeOrder(1, sequencer::orderType::SELL, "SPY", 100, 40, core::task::TimeInForce::GTC)),
+        TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(
+        engine.invokeAddOrder(makeOrder(2, sequencer::orderType::SELL, "SPY", 100, 50, core::task::TimeInForce::GTC)),
+        TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(
+        engine.invokeAddOrder(makeOrder(3, sequencer::orderType::SELL, "SPY", 100, 30, core::task::TimeInForce::GTC)),
+        TestableMatchingEngine::Result::APPLIED);
+    const auto* firstLocation = engine.activeOrderLocation(domain::OrderId{1});
+    const auto* thirdLocation = engine.activeOrderLocation(domain::OrderId{3});
+
+    const auto outcome = engine.invokeProcessCancel(makeCancel(4, 1002, 2));
+    ASSERT_EQ(outcome.events.size(), 1u);
+    const auto* cancelled = std::get_if<domain::OrderCancelled>(&outcome.events.front());
+    ASSERT_NE(cancelled, nullptr);
+    EXPECT_EQ(cancelled->cancelledQuantity, domain::Quantity{50});
+    EXPECT_EQ(engine.sellLevelOrderCount(domain::InstrumentId{1}, domain::Price{100}), 2u);
+    EXPECT_EQ(engine.sellLevelQuantity(domain::InstrumentId{1}, domain::Price{100}), 70u);
+    EXPECT_EQ(engine.activeOrderLocation(domain::OrderId{1}), firstLocation);
+    EXPECT_EQ(engine.activeOrderLocation(domain::OrderId{3}), thirdLocation);
+    EXPECT_EQ(engine.bestSellOrderId(domain::InstrumentId{1}), domain::OrderId{1});
+
+    const auto buy = makeOrder(10, sequencer::orderType::BUY, "SPY", 100, 45, core::task::TimeInForce::IOC);
+    const auto buyOutcome = engine.invokeProcessBuyOrder(buy);
+    ASSERT_EQ(buyOutcome.events.size(), 2u);
+    const auto* firstTrade = std::get_if<domain::Trade>(&buyOutcome.events[0]);
+    const auto* secondTrade = std::get_if<domain::Trade>(&buyOutcome.events[1]);
+    ASSERT_NE(firstTrade, nullptr);
+    ASSERT_NE(secondTrade, nullptr);
+    EXPECT_EQ(firstTrade->makerOrderId, domain::OrderId{1});
+    EXPECT_EQ(secondTrade->makerOrderId, domain::OrderId{3});
+    EXPECT_EQ(engine.activeRemainingQuantity(domain::OrderId{3}), 25u);
+    EXPECT_EQ(engine.sellLevelQuantity(domain::InstrumentId{1}, domain::Price{100}), 25u);
+    EXPECT_TRUE(engine.stateIsConsistent());
+}
+
+TEST(MatchingEngineCancellationTest, PartialFillCancellationUsesExactCurrentRemainder) {
+    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
+    core::Bus bus(8);
+    TestableMatchingEngine engine(&seq_q, bus);
+
+    ASSERT_EQ(
+        engine.invokeAddOrder(makeOrder(1, sequencer::orderType::BUY, "SPY", 100, 100, core::task::TimeInForce::GTC)),
+        TestableMatchingEngine::Result::APPLIED);
+    const auto sell = makeOrder(2, sequencer::orderType::SELL, "SPY", 100, 40, core::task::TimeInForce::IOC);
+    ASSERT_EQ(engine.invokeProcessSellOrder(sell).events.size(), 1u);
+    ASSERT_EQ(engine.activeRemainingQuantity(domain::OrderId{1}), 60u);
+
+    const auto cancel = makeCancel(3, 1001, 1);
+    const auto outcome = engine.invokeProcessCancel(cancel);
+    ASSERT_EQ(outcome.events.size(), 1u);
+    const auto* cancelled = std::get_if<domain::OrderCancelled>(&outcome.events.front());
+    ASSERT_NE(cancelled, nullptr);
+    EXPECT_EQ(*cancelled, (domain::OrderCancelled{
+                              .eventId = domain::EventId{domain::CommandSequence{3}, domain::EventIndex{0}},
+                              .orderId = domain::OrderId{1},
+                              .clientId = domain::ClientId{1001},
+                              .instrumentId = domain::InstrumentId{1},
+                              .cancelledQuantity = domain::Quantity{60},
+                              .reason = domain::CancelReason::CLIENT_REQUESTED,
+                          }));
+    EXPECT_EQ(cancel.globalSequenceNumber, domain::CommandSequence{3});
+    EXPECT_EQ(cancel.clientId, domain::ClientId{1001});
+    EXPECT_EQ(cancel.clientCommandId->value(), "CANCEL-3");
+    EXPECT_FALSE(engine.isActive(domain::OrderId{1}));
+    EXPECT_FALSE(engine.hasInstrument(domain::InstrumentId{1}));
+    EXPECT_TRUE(engine.stateIsConsistent());
+}
+
+TEST(MatchingEngineCancellationTest, MissingAndNotOwnerRejectionsAreExactAndLeaveBookUnchanged) {
+    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
+    core::Bus bus(8);
+    TestableMatchingEngine engine(&seq_q, bus);
+
+    ASSERT_EQ(
+        engine.invokeAddOrder(makeOrder(1, sequencer::orderType::BUY, "SPY", 100, 40, core::task::TimeInForce::GTC)),
+        TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(
+        engine.invokeAddOrder(makeOrder(2, sequencer::orderType::BUY, "SPY", 100, 50, core::task::TimeInForce::GTC)),
+        TestableMatchingEngine::Result::APPLIED);
+    const auto* firstLocation = engine.activeOrderLocation(domain::OrderId{1});
+    const auto* secondLocation = engine.activeOrderLocation(domain::OrderId{2});
+
+    const auto missingOutcome = engine.invokeProcessCancel(makeCancel(3, 1001, 99));
+    ASSERT_EQ(missingOutcome.events.size(), 1u);
+    const auto* missing = std::get_if<domain::CommandRejected>(&missingOutcome.events.front());
+    ASSERT_NE(missing, nullptr);
+    EXPECT_EQ(*missing, (domain::CommandRejected{
+                            .eventId = domain::EventId{domain::CommandSequence{3}, domain::EventIndex{0}},
+                            .commandType = domain::CommandType::CANCEL,
+                            .clientId = domain::ClientId{1001},
+                            .clientCommandId = domain::ClientCommandId{"CANCEL-3"},
+                            .relevantOrderId = std::optional<domain::OrderId>{domain::OrderId{99}},
+                            .reason = domain::CommandRejectionReason::ORDER_NOT_ACTIVE,
+                        }));
+
+    const auto notOwnerOutcome = engine.invokeProcessCancel(makeCancel(4, 9999, 1));
+    ASSERT_EQ(notOwnerOutcome.events.size(), 1u);
+    const auto* notOwner = std::get_if<domain::CommandRejected>(&notOwnerOutcome.events.front());
+    ASSERT_NE(notOwner, nullptr);
+    EXPECT_EQ(*notOwner, (domain::CommandRejected{
+                             .eventId = domain::EventId{domain::CommandSequence{4}, domain::EventIndex{0}},
+                             .commandType = domain::CommandType::CANCEL,
+                             .clientId = domain::ClientId{9999},
+                             .clientCommandId = domain::ClientCommandId{"CANCEL-4"},
+                             .relevantOrderId = std::optional<domain::OrderId>{domain::OrderId{1}},
+                             .reason = domain::CommandRejectionReason::NOT_OWNER,
+                         }));
+
+    EXPECT_EQ(engine.buyLevelQuantity(domain::InstrumentId{1}, domain::Price{100}), 90u);
+    EXPECT_EQ(engine.bestBuyOrderId(domain::InstrumentId{1}), domain::OrderId{1});
+    EXPECT_EQ(engine.activeOrderLocation(domain::OrderId{1}), firstLocation);
+    EXPECT_EQ(engine.activeOrderLocation(domain::OrderId{2}), secondLocation);
+    EXPECT_TRUE(engine.stateIsConsistent());
+}
+
+TEST(MatchingEngineCancellationTest, TerminalTargetsReturnOrderNotActive) {
+    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
+    core::Bus bus(8);
+    TestableMatchingEngine engine(&seq_q, bus);
+
+    ASSERT_EQ(
+        engine.invokeAddOrder(makeOrder(1, sequencer::orderType::SELL, "SPY", 100, 25, core::task::TimeInForce::GTC)),
+        TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(engine
+                  .invokeProcessBuyOrder(
+                      makeOrder(2, sequencer::orderType::BUY, "SPY", 100, 25, core::task::TimeInForce::IOC))
+                  .events.size(),
+              1u);
+
+    const auto ioc = makeOrder(3, sequencer::orderType::BUY, "SPY", 90, 10, core::task::TimeInForce::IOC);
+    const auto iocOutcome = engine.invokeProcessBuyOrder(ioc);
+    ASSERT_NE(std::get_if<domain::OrderCancelled>(&iocOutcome.events.front()), nullptr);
+
+    ASSERT_EQ(
+        engine.invokeAddOrder(makeOrder(4, sequencer::orderType::BUY, "SPY", 90, 15, core::task::TimeInForce::GTC)),
+        TestableMatchingEngine::Result::APPLIED);
+    const auto initialCancelOutcome = engine.invokeProcessCancel(makeCancel(5, 1004, 4));
+    ASSERT_NE(std::get_if<domain::OrderCancelled>(&initialCancelOutcome.events.front()), nullptr);
+
+    for (const auto cancel : {makeCancel(6, 1001, 1), makeCancel(7, 1003, 3), makeCancel(8, 1004, 4)}) {
+        const auto outcome = engine.invokeProcessCancel(cancel);
+        ASSERT_EQ(outcome.events.size(), 1u);
+        const auto* rejected = std::get_if<domain::CommandRejected>(&outcome.events.front());
+        ASSERT_NE(rejected, nullptr);
+        EXPECT_EQ(rejected->reason, domain::CommandRejectionReason::ORDER_NOT_ACTIVE);
+        EXPECT_EQ(rejected->relevantOrderId,
+                  std::optional<domain::OrderId>{domain::OrderId{cancel.targetOrderId->value()}});
+    }
+    EXPECT_FALSE(engine.hasInstrument(domain::InstrumentId{1}));
+    EXPECT_TRUE(engine.stateIsConsistent());
+}
+
+TEST(MatchingEngineCancellationTest, CapacityRejectedTargetIsNotActive) {
+    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
+    core::Bus bus(8);
+    TestableMatchingEngine engine(&seq_q, bus);
+
+    for (uint64_t id = 1; id <= 10; ++id) {
+        ASSERT_EQ(engine.invokeAddOrder(
+                      makeOrder(id, sequencer::orderType::BUY, "SPY", 100, 100000000, core::task::TimeInForce::GTC)),
+                  TestableMatchingEngine::Result::APPLIED);
+    }
+    const auto rejectedOrder = makeOrder(11, sequencer::orderType::BUY, "SPY", 100, 1, core::task::TimeInForce::GTC);
+    const auto rejectedOutcome = engine.invokeProcessBuyOrder(rejectedOrder);
+    ASSERT_EQ(rejectedOutcome.result, TestableMatchingEngine::Result::BOOK_CAPACITY_EXCEEDED);
+
+    const auto cancelOutcome = engine.invokeProcessCancel(makeCancel(12, 1011, 11));
+    ASSERT_EQ(cancelOutcome.events.size(), 1u);
+    const auto* rejected = std::get_if<domain::CommandRejected>(&cancelOutcome.events.front());
+    ASSERT_NE(rejected, nullptr);
+    EXPECT_EQ(rejected->reason, domain::CommandRejectionReason::ORDER_NOT_ACTIVE);
+    EXPECT_EQ(engine.buyLevelQuantity(domain::InstrumentId{1}, domain::Price{100}), 1000000000u);
+    EXPECT_TRUE(engine.stateIsConsistent());
+}
+
+TEST(MatchingEngineCancellationTest, MissingNormalizedFieldsAndInvalidKindsAreInvariantFailures) {
+    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
+    core::Bus bus(8);
+    TestableMatchingEngine engine(&seq_q, bus);
+    ASSERT_EQ(
+        engine.invokeAddOrder(makeOrder(1, sequencer::orderType::BUY, "SPY", 100, 40, core::task::TimeInForce::GTC)),
+        TestableMatchingEngine::Result::APPLIED);
+
+    const auto valid = makeCancel(2, 1001, 1);
+    auto missingSequence = valid;
+    missingSequence.globalSequenceNumber = domain::CommandSequence{};
+    auto missingClient = valid;
+    missingClient.clientId = domain::ClientId{};
+    auto missingClientCommand = valid;
+    missingClientCommand.clientCommandId.reset();
+    auto missingInstrument = valid;
+    missingInstrument.instrumentId = domain::InstrumentId{};
+    auto missingTarget = valid;
+    missingTarget.targetOrderId.reset();
+    auto duplicateIdentity = valid;
+    duplicateIdentity.orderId = domain::OrderId{2};
+
+    EXPECT_THROW(engine.invokeProcessCancel(missingSequence), std::logic_error);
+    EXPECT_THROW(engine.invokeProcessCancel(missingClient), std::logic_error);
+    EXPECT_THROW(engine.invokeProcessCancel(missingClientCommand), std::logic_error);
+    EXPECT_THROW(engine.invokeProcessCancel(missingInstrument), std::logic_error);
+    EXPECT_THROW(engine.invokeProcessCancel(missingTarget), std::logic_error);
+    EXPECT_THROW(engine.invokeProcessCancel(duplicateIdentity), std::logic_error);
+
+    auto wrongInstrument = valid;
+    wrongInstrument.instrumentId = domain::InstrumentId{2};
+    EXPECT_THROW(engine.invokeProcessCancel(wrongInstrument), std::logic_error);
+
+    auto invalidKind = valid;
+    invalidKind.type = sequencer::orderType::CANCELREJ;
+    EXPECT_THROW(engine.invokeProcessMessage(invalidKind), std::logic_error);
+
+    EXPECT_EQ(engine.activeRemainingQuantity(domain::OrderId{1}), 40u);
+    EXPECT_EQ(engine.buyLevelQuantity(domain::InstrumentId{1}, domain::Price{100}), 40u);
+    EXPECT_TRUE(engine.stateIsConsistent());
+}
+
+TEST(MatchingEngineCancellationTest, FillVersusCancelIsDeterminedByProcessingOrder) {
+    {
+        core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
+        core::Bus bus(8);
+        TestableMatchingEngine engine(&seq_q, bus);
+        ASSERT_EQ(engine.invokeAddOrder(
+                      makeOrder(1, sequencer::orderType::SELL, "SPY", 100, 50, core::task::TimeInForce::GTC)),
+                  TestableMatchingEngine::Result::APPLIED);
+
+        const auto cancelOutcome = engine.invokeProcessCancel(makeCancel(2, 1001, 1));
+        ASSERT_NE(std::get_if<domain::OrderCancelled>(&cancelOutcome.events.front()), nullptr);
+        const auto buyOutcome = engine.invokeProcessBuyOrder(
+            makeOrder(3, sequencer::orderType::BUY, "SPY", 100, 50, core::task::TimeInForce::IOC));
+        ASSERT_EQ(buyOutcome.events.size(), 1u);
+        const auto* iocTerminal = std::get_if<domain::OrderCancelled>(&buyOutcome.events.front());
+        ASSERT_NE(iocTerminal, nullptr);
+        EXPECT_EQ(iocTerminal->reason, domain::CancelReason::IOC_REMAINDER);
+        EXPECT_TRUE(engine.stateIsConsistent());
+    }
+    {
+        core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
+        core::Bus bus(8);
+        TestableMatchingEngine engine(&seq_q, bus);
+        ASSERT_EQ(engine.invokeAddOrder(
+                      makeOrder(1, sequencer::orderType::SELL, "SPY", 100, 50, core::task::TimeInForce::GTC)),
+                  TestableMatchingEngine::Result::APPLIED);
+
+        const auto buyOutcome = engine.invokeProcessBuyOrder(
+            makeOrder(2, sequencer::orderType::BUY, "SPY", 100, 50, core::task::TimeInForce::IOC));
+        ASSERT_EQ(buyOutcome.events.size(), 1u);
+        EXPECT_NE(std::get_if<domain::Trade>(&buyOutcome.events.front()), nullptr);
+        const auto cancelOutcome = engine.invokeProcessCancel(makeCancel(3, 1001, 1));
+        ASSERT_EQ(cancelOutcome.events.size(), 1u);
+        const auto* rejected = std::get_if<domain::CommandRejected>(&cancelOutcome.events.front());
+        ASSERT_NE(rejected, nullptr);
+        EXPECT_EQ(rejected->reason, domain::CommandRejectionReason::ORDER_NOT_ACTIVE);
+        EXPECT_TRUE(engine.stateIsConsistent());
+    }
 }

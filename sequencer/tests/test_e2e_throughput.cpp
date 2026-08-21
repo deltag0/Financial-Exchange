@@ -286,6 +286,7 @@ TEST(E2EThroughputTest, FullPipelineWithFixParsing) {
         order.set(FIX::OrderQty(10.0));
         order.set(FIX::Price((fix_messages_injected % 100) + 1.0));
         order.set(FIX::OrdType(FIX::OrdType_LIMIT));
+        order.set(FIX::TimeInForce(FIX::TimeInForce_GOOD_TILL_CANCEL));
 
         // Send through FixTask's fromApp() to parse into sequenceMessage
         try {
