@@ -79,7 +79,9 @@ protected:
 
     ProcessingOutcome processSellOrder(const sequencer::sequenceMessage& message);
 
-    ProcessingOutcome processOrder(const sequencer::sequenceMessage& message, bool restRemainder, bool requireFullFill);
+    ProcessingOutcome processCancel(const sequencer::sequenceMessage& message);
+
+    ProcessingOutcome processOrder(const sequencer::sequenceMessage& message, bool restRemainder);
 
     void matchOrder(const sequencer::sequenceMessage& message, domain::Quantity& remaining,
                     std::vector<domain::BusinessEvent>& events);
@@ -100,7 +102,12 @@ protected:
 
     ProcessingOutcome rejectBookCapacity(const sequencer::sequenceMessage& message) const;
 
+    ProcessingOutcome rejectCancel(const sequencer::sequenceMessage& message, domain::OrderId targetOrderId,
+                                   domain::CommandRejectionReason reason) const;
+
     void removeFilledOrder(std::map<domain::OrderId, ActiveOrder>::iterator activeOrder);
+
+    void removeCancelledOrder(std::map<domain::OrderId, ActiveOrder>::iterator activeOrder);
 
     ProcessingResult addOrder(const sequencer::sequenceMessage& message, domain::Quantity remainingQuantity);
 

@@ -1,7 +1,7 @@
 #include "../include/matching_engine.hpp"
 
 #include "../../core/task/include/task.hpp"
-#include <chrono>
+#include <algorithm>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -13,12 +13,24 @@ namespace exchange::matching_engine {
 
 namespace {
 
-/*
- * Returns whether an order lifetime has elapsed.
- * Invariant: a default-constructed expiry means the order has no expiry.
- */
-bool hasOrderExpired(const std::chrono::system_clock::time_point expiry) {
-    return expiry != std::chrono::system_clock::time_point{} && expiry <= std::chrono::system_clock::now();
+domain::EventId makeEventId(const domain::CommandSequence commandSequence, const std::size_t eventIndex) {
+    if (eventIndex > std::numeric_limits<domain::EventIndex::Underlying>::max()) {
+        throw std::logic_error("EventIndex exhausted during one command");
+    }
+    return domain::EventId{
+        .commandSequence = commandSequence,
+        .eventIndex = domain::EventIndex{static_cast<domain::EventIndex::Underlying>(eventIndex)},
+    };
+}
+
+domain::Side toDomainSide(const sequencer::orderType side) {
+    if (side == sequencer::orderType::BUY) {
+        return domain::Side::BUY;
+    }
+    if (side == sequencer::orderType::SELL) {
+        return domain::Side::SELL;
+    }
+    throw std::logic_error("non-order side reached matching engine");
 }
 
 } // namespace
@@ -57,60 +69,81 @@ void MatchingEngine::drainQueue(core::SharedQueue<sequencer::sequenceMessage>& q
 }
 
 MatchingEngine::ProcessingOutcome MatchingEngine::processBuyOrder(const sequencer::sequenceMessage& message) {
+    if (message.tif != core::task::TimeInForce::GTC && message.tif != core::task::TimeInForce::IOC) {
+        throw std::logic_error("unsupported TimeInForce reached matching engine");
+    }
     if (activeOrders.contains(message.orderId)) {
         throw std::logic_error("duplicate authoritative OrderId reached matching engine");
     }
 
-    switch (message.tif) {
-        case core::task::TimeInForce::IOC:
-            return processOrder(message, false, false);
-        case core::task::TimeInForce::FOK:
-            return processOrder(message, false, true);
-        case core::task::TimeInForce::GTX: {
-            return {ProcessingResult::APPLIED, {}};
-        }
-        case core::task::TimeInForce::ATC:
-            return {ProcessingResult::APPLIED, {}};
-        case core::task::TimeInForce::GTC:
-        case core::task::TimeInForce::DAY:
-        case core::task::TimeInForce::GTD:
-            return processOrder(message, true, false);
-    }
-    throw std::logic_error("unsupported TimeInForce reached matching engine");
+    return processOrder(message, message.tif == core::task::TimeInForce::GTC);
 }
 
 MatchingEngine::ProcessingOutcome MatchingEngine::processSellOrder(const sequencer::sequenceMessage& message) {
+    if (message.tif != core::task::TimeInForce::GTC && message.tif != core::task::TimeInForce::IOC) {
+        throw std::logic_error("unsupported TimeInForce reached matching engine");
+    }
     if (activeOrders.contains(message.orderId)) {
         throw std::logic_error("duplicate authoritative OrderId reached matching engine");
     }
 
-    switch (message.tif) {
-        case core::task::TimeInForce::IOC:
-            return processOrder(message, false, false);
-        case core::task::TimeInForce::GTC:
-            return processOrder(message, true, false);
-        case core::task::TimeInForce::FOK:
-        case core::task::TimeInForce::GTX:
-        case core::task::TimeInForce::ATC:
-        case core::task::TimeInForce::DAY:
-        case core::task::TimeInForce::GTD:
-            return {ProcessingResult::APPLIED, {}};
+    return processOrder(message, message.tif == core::task::TimeInForce::GTC);
+}
+
+MatchingEngine::ProcessingOutcome MatchingEngine::processCancel(const sequencer::sequenceMessage& message) {
+    if (message.type != sequencer::orderType::CANCEL || message.globalSequenceNumber.value() == 0 ||
+        message.clientId.value() == 0 || !message.clientCommandId.has_value() || message.instrumentId.value() == 0 ||
+        !message.targetOrderId.has_value()) {
+        throw std::logic_error("cancel command is missing required normalized fields");
     }
-    throw std::logic_error("unsupported TimeInForce reached matching engine");
+    if (message.orderId.value() != 0) {
+        throw std::logic_error("cancel command carries an unexpected authoritative OrderId");
+    }
+
+    const domain::OrderId targetOrderId = domain::orderIdFrom(*message.targetOrderId);
+    auto activeOrder = activeOrders.find(targetOrderId);
+    if (activeOrder == activeOrders.end()) {
+        return rejectCancel(message, targetOrderId, domain::CommandRejectionReason::ORDER_NOT_ACTIVE);
+    }
+    if (activeOrder->second.owner != message.clientId) {
+        return rejectCancel(message, targetOrderId, domain::CommandRejectionReason::NOT_OWNER);
+    }
+    if (activeOrder->second.instrumentId != message.instrumentId) {
+        throw std::logic_error("cancel command routed to the wrong instrument book");
+    }
+
+    const domain::ClientId owner = activeOrder->second.owner;
+    const domain::InstrumentId instrumentId = activeOrder->second.instrumentId;
+    const domain::Quantity cancelledQuantity = activeOrder->second.remainingQuantity;
+
+    std::vector<domain::BusinessEvent> events;
+    events.reserve(1);
+    events.emplace_back(domain::OrderCancelled{
+        .eventId = makeEventId(message.globalSequenceNumber, 0),
+        .orderId = targetOrderId,
+        .clientId = owner,
+        .instrumentId = instrumentId,
+        .cancelledQuantity = cancelledQuantity,
+        .reason = domain::CancelReason::CLIENT_REQUESTED,
+    });
+
+    removeCancelledOrder(activeOrder);
+    return {ProcessingResult::APPLIED, std::move(events)};
 }
 
 MatchingEngine::ProcessingOutcome MatchingEngine::processOrder(const sequencer::sequenceMessage& message,
-                                                               const bool restRemainder, const bool requireFullFill) {
+                                                               const bool restRemainder) {
     const MatchPlan plan = planMatches(message);
-    if (requireFullFill && plan.remainder.value() > 0) {
-        return {ProcessingResult::APPLIED, {}};
-    }
     if (restRemainder && !canAddOrder(message, plan.remainder)) {
         return rejectBookCapacity(message);
     }
 
+    const std::size_t plannedEventCount = plan.executionCount + (plan.remainder.value() > 0 ? 1u : 0u);
+    if (plannedEventCount > 0) {
+        static_cast<void>(makeEventId(message.globalSequenceNumber, plannedEventCount - 1));
+    }
     std::vector<domain::BusinessEvent> events;
-    events.reserve(plan.executionCount);
+    events.reserve(plannedEventCount);
 
     domain::Quantity remaining = message.quantity;
     matchOrder(message, remaining, events);
@@ -123,6 +156,29 @@ MatchingEngine::ProcessingOutcome MatchingEngine::processOrder(const sequencer::
         if (result != ProcessingResult::APPLIED) {
             throw std::logic_error("price-level capacity changed during single-writer processing");
         }
+
+        events.emplace_back(domain::OrderRested{
+            .eventId = makeEventId(message.globalSequenceNumber, events.size()),
+            .orderId = message.orderId,
+            .clientId = message.clientId,
+            .instrumentId = message.instrumentId,
+            .side = toDomainSide(message.type),
+            .price = message.price,
+            .remainingQuantity = remaining,
+        });
+    } else if (remaining.value() > 0) {
+        events.emplace_back(domain::OrderCancelled{
+            .eventId = makeEventId(message.globalSequenceNumber, events.size()),
+            .orderId = message.orderId,
+            .clientId = message.clientId,
+            .instrumentId = message.instrumentId,
+            .cancelledQuantity = remaining,
+            .reason = domain::CancelReason::IOC_REMAINDER,
+        });
+    }
+
+    if (events.size() != plannedEventCount) {
+        throw std::logic_error("terminal outcome diverged from mutation-free plan");
     }
     return {ProcessingResult::APPLIED, std::move(events)};
 }
@@ -181,6 +237,22 @@ MatchingEngine::ProcessingOutcome MatchingEngine::rejectBookCapacity(const seque
         .reason = domain::CommandRejectionReason::BOOK_CAPACITY_EXCEEDED,
     });
     return {ProcessingResult::BOOK_CAPACITY_EXCEEDED, std::move(events)};
+}
+
+MatchingEngine::ProcessingOutcome MatchingEngine::rejectCancel(const sequencer::sequenceMessage& message,
+                                                               const domain::OrderId targetOrderId,
+                                                               const domain::CommandRejectionReason reason) const {
+    std::vector<domain::BusinessEvent> events;
+    events.reserve(1);
+    events.emplace_back(domain::CommandRejected{
+        .eventId = makeEventId(message.globalSequenceNumber, 0),
+        .commandType = domain::CommandType::CANCEL,
+        .clientId = message.clientId,
+        .clientCommandId = *message.clientCommandId,
+        .relevantOrderId = std::optional<domain::OrderId>{targetOrderId},
+        .reason = reason,
+    });
+    return {ProcessingResult::APPLIED, std::move(events)};
 }
 
 MatchingEngine::ProcessingResult MatchingEngine::addOrder(const sequencer::sequenceMessage& message,
@@ -303,16 +375,8 @@ void MatchingEngine::executeTrade(const sequencer::sequenceMessage& message, con
 
     const domain::Quantity makerRemaining{orderLocation->remainingQuantity.value() - tradeQuantity};
     const domain::Quantity takerRemaining{remaining.value() - tradeQuantity};
-    if (events.size() > std::numeric_limits<domain::EventIndex::Underlying>::max()) {
-        throw std::logic_error("EventIndex exhausted during one command");
-    }
-
     events.emplace_back(domain::Trade{
-        .eventId =
-            domain::EventId{
-                .commandSequence = message.globalSequenceNumber,
-                .eventIndex = domain::EventIndex{static_cast<domain::EventIndex::Underlying>(events.size())},
-            },
+        .eventId = makeEventId(message.globalSequenceNumber, events.size()),
         .instrumentId = message.instrumentId,
         .makerOrderId = orderLocation->orderId,
         .makerClientId = orderLocation->owner,
@@ -422,11 +486,66 @@ void MatchingEngine::removeFilledOrder(std::map<domain::OrderId, ActiveOrder>::i
     }
 }
 
-MatchingEngine::ProcessingOutcome MatchingEngine::processMessage(const sequencer::sequenceMessage& message) {
-    if (message.type != sequencer::orderType::CANCEL && hasOrderExpired(message.expiry)) {
-        return {ProcessingResult::APPLIED, {}};
+void MatchingEngine::removeCancelledOrder(std::map<domain::OrderId, ActiveOrder>::iterator activeOrder) {
+    if (activeOrder == activeOrders.end() || activeOrder->second.remainingQuantity.value() == 0) {
+        throw std::logic_error("only an active positive-quantity order can be cancelled");
     }
 
+    const domain::OrderId orderId = activeOrder->first;
+    const domain::ClientId owner = activeOrder->second.owner;
+    const domain::InstrumentId instrumentId = activeOrder->second.instrumentId;
+    const sequencer::orderType side = activeOrder->second.side;
+    const domain::Price price = activeOrder->second.price;
+    const domain::Quantity remainingQuantity = activeOrder->second.remainingQuantity;
+    const OrderList::iterator orderLocation = activeOrder->second.orderLocation;
+
+    auto instrument = orderBooks.find(instrumentId);
+    if (instrument == orderBooks.end()) {
+        throw std::logic_error("active order references a missing instrument book");
+    }
+
+    const auto removeFromBook = [&](auto& book, const char* missingLevelMessage) {
+        auto priceLevel = book.find(price);
+        if (priceLevel == book.end()) {
+            throw std::logic_error(missingLevelMessage);
+        }
+
+        PriceLevel& level = priceLevel->second;
+        const auto storedOrder = std::find_if(level.orders.begin(), level.orders.end(),
+                                              [&](const OrderNode& node) { return &node == &*orderLocation; });
+        if (storedOrder == level.orders.end() || storedOrder->orderId != orderId || storedOrder->owner != owner ||
+            storedOrder->remainingQuantity != remainingQuantity || level.totalQuantity < remainingQuantity) {
+            throw std::logic_error("active-order index is inconsistent with cancellation target");
+        }
+
+        const bool removeLevel = level.orders.size() == 1;
+        if ((removeLevel && level.totalQuantity != remainingQuantity) ||
+            (!removeLevel && level.totalQuantity <= remainingQuantity)) {
+            throw std::logic_error("price-level aggregate is inconsistent with cancellation target");
+        }
+
+        level.totalQuantity = domain::Quantity{level.totalQuantity.value() - remainingQuantity.value()};
+        level.orders.erase(orderLocation);
+        activeOrders.erase(activeOrder);
+        if (removeLevel) {
+            book.erase(priceLevel);
+        }
+    };
+
+    if (side == sequencer::orderType::BUY) {
+        removeFromBook(instrument->second.bids, "active order references a missing bid level");
+    } else if (side == sequencer::orderType::SELL) {
+        removeFromBook(instrument->second.asks, "active order references a missing ask level");
+    } else {
+        throw std::logic_error("active order has a non-resting side");
+    }
+
+    if (instrument->second.bids.empty() && instrument->second.asks.empty()) {
+        orderBooks.erase(instrument);
+    }
+}
+
+MatchingEngine::ProcessingOutcome MatchingEngine::processMessage(const sequencer::sequenceMessage& message) {
     switch (message.type) {
         case sequencer::orderType::BUY:
             return processBuyOrder(message);
@@ -434,10 +553,10 @@ MatchingEngine::ProcessingOutcome MatchingEngine::processMessage(const sequencer
             return processSellOrder(message);
 
         case sequencer::orderType::CANCEL:
-            return {ProcessingResult::APPLIED, {}};
+            return processCancel(message);
 
         case sequencer::orderType::CANCELREJ:
-            return {ProcessingResult::APPLIED, {}};
+            throw std::logic_error("CANCELREJ is not a valid matching-engine command");
     }
     throw std::logic_error("unsupported order type reached matching engine");
 }

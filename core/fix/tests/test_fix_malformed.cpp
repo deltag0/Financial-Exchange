@@ -12,6 +12,7 @@ TEST(FixMalformed, MalformedNumericFieldsThrow) {
     msg.setField(FIX::Symbol("SPY"));
     msg.setField(FIX::Side(FIX::Side_BUY));
     msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
+    msg.setField(FIX::TimeInForce(FIX::TimeInForce_GOOD_TILL_CANCEL));
     // Intentionally set non-numeric OrderQty and Price using StringField
     msg.setField(FIX::StringField(38, "not-a-number"));
     msg.setField(FIX::StringField(44, "nope"));
@@ -32,6 +33,7 @@ TEST(FixMalformed, FixTaskFromAppHandlesMalformed) {
     msg.setField(FIX::Symbol("SPY"));
     msg.setField(FIX::Side(FIX::Side_BUY));
     msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
+    msg.setField(FIX::TimeInForce(FIX::TimeInForce_GOOD_TILL_CANCEL));
     msg.setField(FIX::StringField(38, "not-a-number"));
 
     FIX::SessionID sid("FIX.4.4", "S", "T");
@@ -51,6 +53,7 @@ TEST(FixMalformed, UnknownOverlongSymbolIsRejected) {
     msg.setField(FIX::OrderQty(1));
     msg.setField(FIX::Price(1.01));
     msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
+    msg.setField(FIX::TimeInForce(FIX::TimeInForce_GOOD_TILL_CANCEL));
 
     FIX::SessionID sid("FIX.4.4", "S", "T");
     EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, 4), exchange::core::fix::FixValidationError);
@@ -66,6 +69,7 @@ TEST(FixMalformed, UnknownNonAsciiSymbolIsRejected) {
     msg.setField(FIX::OrderQty(2));
     msg.setField(FIX::Price(1.01));
     msg.setField(FIX::OrdType(FIX::OrdType_LIMIT));
+    msg.setField(FIX::TimeInForce(FIX::TimeInForce_GOOD_TILL_CANCEL));
 
     FIX::SessionID sid("FIX.4.4", "S", "T");
     EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, 2), exchange::core::fix::FixValidationError);

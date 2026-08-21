@@ -17,7 +17,9 @@ void exchange::sequencer::Sequencer::run() {
                           << std::endl;
 
                 message.globalSequenceNumber = getNextGlobalSequenceNumber(message);
-                message.orderId = domain::orderIdFrom(message.globalSequenceNumber);
+                if (message.type == orderType::BUY || message.type == orderType::SELL) {
+                    message.orderId = domain::orderIdFrom(message.globalSequenceNumber);
+                }
                 message.topicSequenceNumber = getNextTopicSequenceNumber(message);
 
                 if (matchingEngineQueue && !matchingEngineQueue->push(message)) {

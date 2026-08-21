@@ -140,141 +140,31 @@ domain::Quantity parseQuantityUnits(const std::string_view text,
 }
 
 /*
- * Returns whether this parser can currently preserve the requested TIF
- * semantics all the way through the matching engine.
- *
- * Bad combinations found here:
- * - GTX is rejected until the engine has explicit crossing support.
- * - Unknown enum values are rejected by the final return path instead of being
- *   silently cast into a downstream switch.
- */
-bool isSupportedTimeInForce(const TimeInForce tif) {
-    switch (tif) {
-        case TimeInForce::DAY:
-        case TimeInForce::GTC:
-        case TimeInForce::IOC:
-        case TimeInForce::FOK:
-        case TimeInForce::ATC:
-        case TimeInForce::GTD:
-            return true;
-        case TimeInForce::GTX:
-            return false;
-    }
-    return false;
-}
-
-/*
- * Temporary DAY policy until we have an exchange calendar/session model.
- * Invariant: returned time is the next UTC midnight and is strictly in the
- * future for a live system clock.
- */
-std::chrono::system_clock::time_point endOfCurrentUtcDay() {
-    const auto now = std::chrono::system_clock::now();
-    const auto secondsSinceEpoch = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-    const auto nextUtcMidnightSeconds = ((secondsSinceEpoch / 86400) + 1) * 86400;
-    return std::chrono::system_clock::time_point{std::chrono::seconds(nextUtcMidnightSeconds)};
-}
-
-/*
- * Exchange-owned ATC expiry policy until there is a full session calendar.
- * Invariant: returned time is 16:30:00 on the current UTC date.
- */
-std::chrono::system_clock::time_point atcCloseOfCurrentUtcDay() {
-    constexpr int64_t secondsPerDay = 86400;
-    constexpr int64_t atcCloseSeconds = (16 * 60 * 60) + (30 * 60);
-
-    const auto now = std::chrono::system_clock::now();
-    const auto secondsSinceEpoch = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-    const auto currentUtcMidnightSeconds = (secondsSinceEpoch / secondsPerDay) * secondsPerDay;
-    return std::chrono::system_clock::time_point{std::chrono::seconds(currentUtcMidnightSeconds + atcCloseSeconds)};
-}
-
-/*
- * Extracts TimeInForce and applies the exchange default.
- * Invariant: missing tag 59 is treated as DAY, matching common FIX behavior.
- *
- * Bad combinations found here:
- * - Unsupported TIF values are rejected before they can reach the sequencer.
+ * Requires the adopted TimeInForce values before sequencing. There is no FIX
+ * default because DAY behavior is explicitly deferred by the exchange rules.
  */
 TimeInForce extractTimeInForce(const FIX::Message& fixMessage) {
     FIX::TimeInForce tif;
     if (!fixMessage.isSetField(tif)) {
-        return TimeInForce::DAY;
+        throw FIX::FieldNotFound(FIX::FIELD::TimeInForce);
     }
 
     fixMessage.getField(tif);
     const auto value = static_cast<TimeInForce>(tif.getValue());
-    if (!isSupportedTimeInForce(value)) {
+    if (value != TimeInForce::GTC && value != TimeInForce::IOC) {
         throw FixValidationError("unsupported TimeInForce");
     }
     return value;
 }
 
 /*
- * Converts FIX ExpireTime into the system_clock representation used by
- * sequenceMessage. Caller must ensure tag 126 is present.
+ * Expiry-bearing behavior is outside the adopted GTC/IOC scope.
  */
-std::chrono::system_clock::time_point parseExpireTime(const FIX::Message& fixMessage) {
-    FIX::ExpireTime expiry;
-    fixMessage.getField(expiry);
-
-    const auto ts = expiry.getValue();
-    return std::chrono::system_clock::time_point{std::chrono::seconds(ts.getTimeT())};
-}
-
-/*
- * Validates tag 126 (expiry time) against the already-validated TimeInForce and returns the
- * expiry value that should be stored on the sequenced order.
- *
- * Bad combinations found here:
- * - DAY + ExpireTime: rejected because DAY expiry is exchange/session-owned.
- * - GTC/IOC/FOK + ExpireTime: rejected because only GTD should carry ExpireTime.
- * - GTD without ExpireTime: rejected because GTD needs a concrete expiry.
- * - GTD with past ExpireTime: rejected because it is expired at ingress.
- * - ATC + ExpireTime: rejected because ATC expiry is exchange/session-owned.
- * - GTX: rejected because these semantics are not implemented yet.
- */
-std::chrono::system_clock::time_point validateExpiry(const FIX::Message& fixMessage, const TimeInForce tif) {
-    const bool hasExpireTime = fixMessage.isSetField(FIX::FIELD::ExpireTime);
-
-    switch (tif) {
-        case TimeInForce::DAY:
-            if (hasExpireTime) {
-                throw FixValidationError("DAY orders must not specify ExpireTime");
-            }
-            return endOfCurrentUtcDay();
-
-        case TimeInForce::GTC:
-        case TimeInForce::IOC:
-        case TimeInForce::FOK:
-            if (hasExpireTime) {
-                throw FixValidationError("ExpireTime is only valid for GTD orders");
-            }
-            return {};
-
-        case TimeInForce::ATC:
-            if (hasExpireTime) {
-                throw FixValidationError("ATC orders must not specify ExpireTime");
-            }
-            return atcCloseOfCurrentUtcDay();
-
-        case TimeInForce::GTD: {
-            if (!hasExpireTime) {
-                throw FixValidationError("GTD orders require ExpireTime");
-            }
-
-            const auto expiry = parseExpireTime(fixMessage);
-            if (expiry <= std::chrono::system_clock::now()) {
-                throw FixValidationError("ExpireTime must be in the future");
-            }
-            return expiry;
-        }
-
-        case TimeInForce::GTX:
-            throw FixValidationError("unsupported TimeInForce");
+std::chrono::system_clock::time_point validateExpiry(const FIX::Message& fixMessage) {
+    if (fixMessage.isSetField(FIX::FIELD::ExpireTime)) {
+        throw FixValidationError("ExpireTime is not supported for GTC or IOC orders");
     }
-
-    throw FixValidationError("unsupported TimeInForce");
+    return {};
 }
 
 /*
@@ -339,14 +229,12 @@ domain::Price extractLimitPrice(const FIX::Message& fixMessage,
 }
 
 /*
- * Cancel requests operate on an existing client order ID and must not carry
- * placement-only lifetime fields.
- * Bad combinations found here: Cancel + TimeInForce and Cancel + ExpireTime.
+ * FIX OrigClOrdID is a client identifier, not an authoritative exchange
+ * OrderId. No adopted lookup currently maps it to TargetOrderId, so FIX cancel
+ * normalization must stop before sequencing.
  */
-void validateCancel(const FIX::Message& fixMessage) {
-    if (fixMessage.isSetField(FIX::FIELD::TimeInForce) || fixMessage.isSetField(FIX::FIELD::ExpireTime)) {
-        throw FixValidationError("cancel messages must not specify TimeInForce or ExpireTime");
-    }
+[[noreturn]] void rejectUnmappedFixCancel() {
+    throw FixValidationError("FIX cancel to TargetOrderId mapping is not implemented");
 }
 
 } /* namespace */
@@ -371,8 +259,7 @@ sequencer::sequenceMessage parseFixMessage(const FIX::Message& fixMessage, const
 
         /* Determine order type based on message type */
         if (msgType.getValue() == "F") {
-            validateCancel(fixMessage);
-            seqMsg.type = sequencer::orderType::CANCEL;
+            rejectUnmappedFixCancel();
         } else if (msgType.getValue() == "D") {
             validateNewOrderType(fixMessage);
             seqMsg.type = extractSide(fixMessage);
@@ -415,7 +302,7 @@ sequencer::sequenceMessage parseFixMessage(const FIX::Message& fixMessage, const
 
         if (seqMsg.type != sequencer::orderType::CANCEL) {
             seqMsg.tif = extractTimeInForce(fixMessage);
-            seqMsg.expiry = validateExpiry(fixMessage, seqMsg.tif);
+            seqMsg.expiry = validateExpiry(fixMessage);
         }
 
         /* Assign global order counter and timestamp */
