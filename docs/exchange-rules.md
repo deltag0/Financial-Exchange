@@ -77,6 +77,9 @@ from **Unresolved decisions**. Code must not silently decide unresolved behavior
   `OrderId` is a distinct strong type backed by `uint64_t` and is never reused.
 - `ClientId` is a stable exchange-assigned client identity. It remains the same across transport
   sessions and reconnects. It is a distinct strong type backed by `uint64_t`.
+- Initially, persisted exchange configuration maps each authorized FIX identity to its numeric
+  `ClientId`. Reconnecting, or using another permitted session for the same client, preserves that
+  `ClientId`. A transport-session hash is not a client identity.
 - `ClientCommandId` is selected by the client and is unique within that `ClientId`. The logical
   command identity is `(ClientId, ClientCommandId)`. `ClientCommandId` is a bounded-string strong
   type containing between 1 and 64 ASCII bytes. Comparison is case-sensitive and exact byte for
@@ -143,14 +146,26 @@ identity.
 ### Command sequencing and processing
 
 - The sequencer assigns every sequenced command one authoritative global command sequence.
+- Newly admitted commands enter one authoritative FIFO sequencing boundary. Their order is the order
+  in which that boundary accepts them. The initial rules make no stronger cross-client or
+  cross-session fairness guarantee.
 - Every command that passes pre-sequencing admission receives a sequence, including a command that
   later produces a state-dependent `CommandRejected` event.
+- A candidate sequence becomes assigned, consumed, and authoritative only when its complete command
+  record is confirmed durably committed. No later sequence may be committed first. If append or
+  durable synchronization fails or has an uncertain outcome, admission halts and recovery inspects
+  the journal before selecting the next sequence.
 - Commands assigned to a state-owning partition are processed in increasing authoritative command
   sequence order.
 - A state-owning partition completes all matching-state transitions and event generation for one
   command before it begins processing its next command.
-- Independent partitions may operate concurrently. Whether publication must preserve a single
-  real-time order across independent partitions remains unresolved.
+- Independent partitions may operate concurrently. Each partition makes a completed command's event
+  batch eligible for publication as soon as it can hand off the complete batch. Within one
+  partition, commands are published in increasing `CommandSequence`; events from one command are
+  published in increasing `EventIndex`.
+- Consumers are not guaranteed to receive events in globally increasing `CommandSequence` order
+  across independent partitions. The authoritative global command order remains reconstructible
+  from the command journal and event identifiers.
 
 ### Business events
 
@@ -202,9 +217,47 @@ identity.
 - A rejected command changes no matching-engine state and produces exactly one `CommandRejected`
   event.
 
+### Event visibility and result redelivery
+
+- The full authoritative `Trade` is available internally.
+- Each participant receives a private execution view containing the event identity, instrument, its
+  own order identity, role or side, execution price and quantity, and its own remaining quantity.
+  It does not disclose the counterparty's `ClientId`, `OrderId`, or remaining quantity.
+- Sanitized trade information may later be public. The initial rules do not yet adopt a public trade
+  feed or its format.
+- `OrderRested`, `OrderCancelled`, and `CommandRejected` are private to the affected client. Their
+  resulting book or quote changes may later produce separate public market-data events.
+- Committed private results survive client disconnection. Initially, retransmitting the identical
+  `(ClientId, ClientCommandId)` is the required way to wait for or retrieve the original result.
+- Retrieval or redelivery preserves the original `CommandSequence` and `EventId` values. It creates
+  no new command, sequence, event, trade, or matching-state mutation.
+- Automatic unsolicited replay to a reconnected session is not required initially.
+
+### Result capacity and event handoff
+
+- The initial `MaxEventsPerCommand` is 4,096 business events, including any terminal event. This
+  limit applies to every command. A future change to the limit must preserve the historical value
+  used to replay earlier commands.
+- Before any matching-state mutation, the matching engine calculates the exact number of events the
+  command would produce using checked arithmetic.
+- If that count exceeds `MaxEventsPerCommand`, the command produces exactly one
+  `CommandRejected(BookCapacityExceeded)` and makes no matching-state mutation.
+- Capacity for that single rejection is reserved independently of the normal result batch. A failure
+  outside the configured operating bounds causes fail-stop and recovery rather than an invented
+  business rejection.
+- Handoff accepts the complete event batch for one command atomically. If the downstream boundary is
+  full, the affected partition applies backpressure until the batch is accepted or the partition
+  enters fail-stop and recovery.
+- Once a command is durable, downstream saturation cannot change its business result. Committed
+  events are never silently dropped.
+
 ### Cancellation
 
 - A cancellation targets an exchange `OrderId`.
+- An initial FIX Cancel Request supplies that target as the exact decimal exchange `OrderId` in
+  `OrderID(37)`. `ClOrdID(11)` identifies the new Cancel command. `OrigClOrdID(41)` may be retained
+  for protocol correlation but is not authoritative and is never hashed or reinterpreted as an
+  `OrderId`.
 - An order is active exactly when it is resting in its instrument's order book with positive
   remaining quantity.
 - Fully filled, previously cancelled, IOC-terminal, rejected, and never-accepted orders are not
@@ -226,6 +279,10 @@ identity.
   state. Absence produces `OrderNotActive`; presence followed by an owner mismatch produces
   `NotOwner`; otherwise the remaining quantity is removed atomically from both the order book and
   active-order state.
+- A Cancel is routed using its normalized `InstrumentId`, and `TargetOrderId` is looked up only in
+  that instrument's owning partition. If it is not active there, the result is `OrderNotActive`; no
+  cross-partition search is performed for diagnosis. A mismatch caused by an internal routing error
+  is an invariant failure rather than a business rejection.
 
 ### Self-trading
 
@@ -249,6 +306,8 @@ identity.
 - An identical retransmission returns or waits for the original result and receives no new
   `CommandSequence`. Conflicting reuse receives `DuplicateCommandConflict` as an admission rejection
   and also receives no new `CommandSequence`.
+- An identical retransmission received while the original command is still in flight attaches to
+  that operation and waits for the same result rather than creating parallel business work.
 - The admission index is reconstructed from the authoritative command journal during recovery. An
   in-flight reservation lost before journal durability may be admitted again after restart because
   no business action was durably committed.
@@ -286,9 +345,10 @@ identity.
 - Performance results must state the durability policy. A benchmark must not claim improved durable
   latency by acknowledging before durability without explicitly describing the weaker guarantee.
 - The initial commit path is:
-  1. assign the global command sequence;
-  2. append the immutable normalized command;
-  3. complete the configured durable synchronization;
+  1. select the next candidate global command sequence;
+  2. append the immutable normalized command containing that candidate;
+  3. complete the configured durable synchronization, at which point the sequence becomes
+     authoritative;
   4. process the command;
   5. publish the resulting events;
   6. acknowledge the business result.
@@ -307,21 +367,18 @@ checked arithmetic are adopted. The following remain unresolved:
 
 ### 2. Sequencer admission, fairness, and gaps
 
-The global sequence scope is adopted, but the following remain unresolved:
+The global sequence scope, initial FIFO boundary, and no-later-commit failure behavior are adopted.
+The following remain unresolved:
 
-- The fair merge policy when several sessions or gateways submit concurrently.
 - Handling of missing positions, duplicate internal delivery, and restart.
-- Whether commands for independent partitions may publish events concurrently or require a global
-  publication merge.
-- Whether sequence positions may contain durable gaps after a failure during assignment or append.
 
 ### 3. Event visibility and delivery
 
-The initial event schemas and deterministic ordering are adopted. The following remain unresolved:
+Initial private visibility, identical-command result retrieval, and concurrent cross-partition
+publication are adopted. The following remain unresolved:
 
-- Which event data is private, public, or both.
-- How gateways recover or redeliver a business result after disconnect.
-- Whether cross-partition consumers observe events in globally sorted `EventId` order.
+- Protocol-specific result-history requests beyond identical command retransmission.
+- Whether a protocol automatically sends unacknowledged results after reconnect.
 
 ### 4. Instrument and configuration lifecycle
 
@@ -401,13 +458,14 @@ unresolved:
 - Recovery-time target and clean-shutdown guarantees.
 - Whether recovery republishes events and how consumers deduplicate them.
 - How configuration versions are retained and loaded for replay.
-- Behavior when durable synchronization succeeds but processing or publication fails before the
-  client receives its result.
 
 ### 10. Backpressure and unavailable components
 
 **Question:** What happens when an ingress or internal boundary reaches capacity or a component is
 unavailable?
+
+The per-command result bound and post-commit event-handoff behavior are adopted. Other ingress and
+internal boundaries still require decisions.
 
 **Options to decide:**
 
@@ -425,12 +483,15 @@ unavailable?
 **Current recommendation:** Use bounded queues with observable saturation. Once a command has been
 acknowledged as accepted, it must complete or remain recoverable; it must not be silently discarded.
 
-### Decisions required before completing the initial matching engine
+### Initial matching-engine decision status
 
-Before completing all adopted initial matching behavior, decide:
+No additional state-dependent `CommandRejectionReason` is required for the adopted initial command
+scope. `OrderNotActive`, `NotOwner`, and `BookCapacityExceeded` remain the complete initial set.
+Wrong client input is handled at the documented validation or state boundary; an internal routing
+contradiction is an invariant failure.
 
-1. any additional state-dependent `CommandRejectionReason` values;
-2. whether event publication is globally merged across partitions.
+Publication across independent partitions is not globally merged. Per-partition and per-command
+ordering remain required as specified in the adopted rules.
 
 Trading sessions, expiry, modification, additional order types, market data, snapshots, and group
 commit can remain deferred. New-order state-machine tests can begin before event delivery and
