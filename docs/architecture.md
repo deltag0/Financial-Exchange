@@ -122,6 +122,10 @@ events into protocol-specific responses.
 
 Multiple gateway protocols may use the same normalized command model.
 
+Initially, persisted exchange configuration maps each authorized FIX identity to its numeric
+`ClientId`. A reconnect or another permitted session for the same client uses the same mapping;
+transport-session hashes are not authoritative identities.
+
 ### Normalization and validation
 
 #### Purpose
@@ -148,6 +152,9 @@ order type, TimeInForce, and any required ownership information.
 - sequencing policy.
 
 The adopted rules determine which validation results must be sequenced for deterministic replay.
+For the initial FIX adapter, `OrderID(37)` is parsed as the authoritative exchange-assigned
+`TargetOrderId` for a Cancel. `OrigClOrdID(41)` may be kept for protocol correlation, but it is not
+used to derive exchange identity.
 
 ### Command admission and retransmission
 
@@ -203,6 +210,11 @@ Establish the authoritative processing position for commands that can affect the
 The sequence scope is global. Partitions may process independent instruments concurrently, but each
 partition observes the global positions assigned to its commands and cannot introduce a different
 priority order.
+
+The initial sequencing boundary is FIFO in the order it accepts newly admitted commands. It selects
+the next candidate sequence for the journal, but that sequence becomes authoritative only after the
+complete command record is confirmed durable. A failed or uncertain append halts admission and
+requires journal recovery before another sequence is selected.
 
 ### Journal
 
@@ -285,12 +297,18 @@ changes and business events.
 The matching engine is a deterministic state machine. Given the same instrument configuration,
 initial state, and sequenced commands, it produces the same final state and ordered business events.
 
+Before mutation, it calculates the complete result size. The initial limit is 4,096 business events
+per command. A larger result becomes one `BookCapacityExceeded` rejection without mutation, using
+capacity reserved for that rejection. Replay must use the historical limit that governed the
+original command.
+
 An order enters the active-order index only when positive quantity rests in the book. Full fill and
 successful cancellation remove it from both the book and index as one state transition. A Cancel is
 routed by its `InstrumentId`; the owning partition looks up `TargetOrderId` in this index before
 checking `ClientId`. A missing entry produces `OrderNotActive`. The retransmission index is separate:
 it allows an identical repeated cancel to receive its original result even though the order has since
-left the active-order index.
+left the active-order index. No cross-partition search is made to diagnose a missing target. An
+internal routing contradiction is an invariant failure.
 
 ### Event stream
 
@@ -316,8 +334,14 @@ observability, and recovery consumers.
 
 An event contains enough information to understand the state transition without relying on a mutable
 command object. Its stable identity is `(commandSequence, eventIndex)`, where `eventIndex` starts at
-zero for each command. A global publication merge across independent partitions remains an
-exchange-rule decision.
+zero for each command. One partition publishes its commands in increasing `CommandSequence`, and one
+command's events in increasing `EventIndex`. Independent partitions publish concurrently, so live
+consumers are not promised globally increasing `CommandSequence` order. The command journal remains
+the source for reconstructing authoritative global command order.
+
+The boundary accepts one command's complete event batch atomically. A full boundary applies
+backpressure to the affected partition. After a command is durable, saturation cannot change its
+business result or silently discard its events.
 
 ### Private execution delivery
 
@@ -338,6 +362,15 @@ gateway.
 - event creation;
 - public market data;
 - sequencing policy.
+
+Initially, identical command retransmission is the required result-retrieval path. It waits for or
+returns the original committed result with the original identifiers. Automatic unsolicited result
+replay after reconnect is not required.
+
+The private view of a trade contains the recipient's order identity, role or side, execution price
+and quantity, and own remaining quantity. It excludes the counterparty's client identity, order
+identity, and remaining quantity. Rest, cancellation, and command-rejection events are private to
+the affected client. A future public trade or quote feed is a separate market-data concern.
 
 ### Market-data publisher
 
@@ -463,10 +496,11 @@ The normalized, sequenced command journal is the local authoritative source from
 state is reconstructed. An external database, replica, or cache is not required for the initial
 recovery model.
 
-The initial processing path is normalization, authoritative command admission, global sequence
-assignment, immutable command append, durable synchronization, matching, event publication, and
-business-result acknowledgement. If the process fails after durable synchronization but before
-acknowledgement, recovery reprocesses the committed command and regenerates its deterministic events.
+The initial processing path is normalization, authoritative command admission, candidate global
+sequence selection, immutable command append, durable synchronization and authoritative sequence
+assignment, matching, event publication, and business-result acknowledgement. If the process fails
+after durable synchronization but before acknowledgement, recovery reprocesses the committed command
+and regenerates its deterministic events.
 Recovery also reconstructs the mapping from
 `(ClientId, ClientCommandId)` to the normalized command and its original result so retransmission
 cannot execute the business action twice. The command-admission boundary enforces this mapping before
@@ -494,9 +528,10 @@ Every asynchronous boundary defines:
 - shutdown and drain behavior;
 - metrics and client-visible failure behavior.
 
-Before acknowledgement, capacity pressure may result in a defined rejection. After acknowledgement,
-the command must remain recoverable and may not be silently dropped. Bounded retry must preserve
-identity and ordering.
+Before matching-state mutation, a command whose planned result exceeds the adopted per-command bound
+receives the defined capacity rejection. Once a command is durable, event-handoff pressure is not a
+business rejection: the affected partition waits or enters fail-stop and recovery. Committed events
+may not be silently dropped. Retry preserves identity and ordering.
 
 An invariant failure isolates or stops the affected state owner and reports the failure. Continuing
 with silently corrupted order-book state is not an acceptable degraded mode.
