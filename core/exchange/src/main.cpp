@@ -24,6 +24,7 @@
 
 #define NUM_SHARDS 4
 #define BUS_SIZE 16384
+#define COMMAND_RESULT_QUEUE_SIZE 1000
 
 int main() {
     std::cout << "Starting Exchange FIX Acceptor with " << NUM_SHARDS << " Sequencer Shards..."
@@ -48,12 +49,13 @@ int main() {
         }
 
         exchange::core::Bus multicastBus(BUS_SIZE);
+        exchange::matching_engine::BoundedCommandResultQueue commandResultQueue(COMMAND_RESULT_QUEUE_SIZE);
 
         // Initialize FIX Application with all shards
         exchange::core::task::FixTask application(shard_queue_ptrs, multicastBus);
 
-        exchange::matching_engine::MatchingEngine matching_engine(matching_engine_queue.get(),
-                                                                  multicastBus);
+        exchange::matching_engine::MatchingEngine matching_engine(matching_engine_queue.get(), multicastBus,
+                                                                  commandResultQueue);
 
         // FixTask now owns the continuous drain loop for FIX-to-sequencer traffic.
         // Keep it running on its own thread so the acceptor can keep handling ports.

@@ -71,10 +71,12 @@ TEST(E2EThroughputTest, SequencerToMatchingEngineThroughput) {
 
     core::SharedQueue<sequencer::sequenceMessage> matching_engine_queue(queue_size);
     core::Bus multicast_bus(131072);
+    matching_engine::BoundedCommandResultQueue command_result_queue(queue_size);
 
     // Create pipeline components
     auto sequencer = std::make_unique<sequencer::Sequencer>(sequencer_queues, &matching_engine_queue);
-    auto matching_engine = std::make_unique<matching_engine::MatchingEngine>(&matching_engine_queue, multicast_bus);
+    auto matching_engine =
+        std::make_unique<matching_engine::MatchingEngine>(&matching_engine_queue, multicast_bus, command_result_queue);
 
     std::atomic<bool> stop_sequencer{false};
     std::atomic<bool> stop_matching{false};
@@ -199,6 +201,7 @@ TEST(E2EThroughputTest, FullPipelineWithFixParsing) {
 
     core::SharedQueue<sequencer::sequenceMessage> matching_engine_queue(queue_size);
     core::Bus multicast_bus(131072);
+    matching_engine::BoundedCommandResultQueue command_result_queue(queue_size);
 
     // Create FixTask
     core::task::FixTask fix_task(sequencer_queues, multicast_bus);
@@ -206,7 +209,8 @@ TEST(E2EThroughputTest, FullPipelineWithFixParsing) {
 
     // Create sequencer and matching engine
     auto sequencer = std::make_unique<sequencer::Sequencer>(sequencer_queues, &matching_engine_queue);
-    auto matching_engine = std::make_unique<matching_engine::MatchingEngine>(&matching_engine_queue, multicast_bus);
+    auto matching_engine =
+        std::make_unique<matching_engine::MatchingEngine>(&matching_engine_queue, multicast_bus, command_result_queue);
 
     std::atomic<bool> stop_fix{false};
     std::atomic<bool> stop_sequencer{false};

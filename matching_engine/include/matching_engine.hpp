@@ -1,5 +1,7 @@
 #pragma once
 
+#include "command_result_queue.hpp"
+
 #include "../../bus/include/bus.hpp"
 #include "../../core/domain/include/business_events.hpp"
 #include "../../core/instrument/include/instrument_config.hpp"
@@ -12,22 +14,24 @@
 #include <iterator>
 #include <list>
 #include <map>
+#include <memory>
 #include <vector>
 
 namespace exchange::matching_engine {
 
 class MatchingEngine : public exchange::core::task::Task<sequencer::sequenceMessage> {
 public:
-    MatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus);
+    MatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus,
+                   BoundedCommandResultQueue& commandResultQueue);
 
     void run() override;
     void send(sequencer::sequenceMessage& message) override;
 
 protected:
-    enum class ProcessingResult {
-        APPLIED,
-        BOOK_CAPACITY_EXCEEDED,
-    };
+    MatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus,
+                   std::size_t ownedResultQueueCapacity);
+
+    using ProcessingResult = exchange::matching_engine::ProcessingResult;
 
     struct ProcessingOutcome {
         ProcessingResult result;
@@ -111,10 +115,17 @@ protected:
 
     ProcessingResult addOrder(const sequencer::sequenceMessage& message, domain::Quantity remainingQuantity);
 
+    bool handoffPendingResult();
+
     core::SharedQueue<sequencer::sequenceMessage>& sequencerQueue;
 
     // Re-transmission bus for data to ports
     core::Bus& multicastBus;
+
+    // Matching owns retry state; the event-stream boundary owns accepted immutable batches.
+    std::unique_ptr<BoundedCommandResultQueue> ownedCommandResultQueue;
+    BoundedCommandResultQueue& commandResultQueue;
+    ImmutableCommandResultBatch pendingCommandResult;
 
     std::map<domain::InstrumentId, InstrumentBook> orderBooks;
 

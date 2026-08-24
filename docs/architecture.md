@@ -283,7 +283,9 @@ changes and business events.
 - fill and trade formation;
 - stateful order, cancellation, modification, and expiry decisions;
 - book invariants;
-- deterministic event production for each command.
+- deterministic event production for each command;
+- retention of a completed command result until the event-stream boundary accepts its complete
+  batch.
 
 #### Does not own
 
@@ -291,7 +293,7 @@ changes and business events.
 - protocol parsing;
 - command sequencing;
 - durable acknowledgement policy;
-- event delivery retries;
+- event delivery retries after the event-stream boundary accepts a batch;
 - market-data transport.
 
 The matching engine is a deterministic state machine. Given the same instrument configuration,
@@ -342,6 +344,11 @@ the source for reconstructing authoritative global command order.
 The boundary accepts one command's complete event batch atomically. A full boundary applies
 backpressure to the affected partition. After a command is durable, saturation cannot change its
 business result or silently discard its events.
+
+Until that atomic acceptance succeeds, the state-owning partition retains one immutable complete
+batch and does not begin another command. Once accepted, the event-stream side owns the batch and the
+partition clears its retry reference. Retrying a full boundary therefore cannot partially publish or
+duplicate the batch.
 
 ### Private execution delivery
 
