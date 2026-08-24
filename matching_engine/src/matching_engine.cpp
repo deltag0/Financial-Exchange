@@ -13,6 +13,15 @@ namespace exchange::matching_engine {
 
 namespace {
 
+constexpr std::size_t MAX_EVENTS_PER_COMMAND = 4'096;
+
+std::size_t checkedAddEventCount(const std::size_t currentCount, const std::size_t additionalCount) {
+    if (additionalCount > std::numeric_limits<std::size_t>::max() - currentCount) {
+        throw std::logic_error("business-event count overflow during matching plan");
+    }
+    return currentCount + additionalCount;
+}
+
 domain::EventId makeEventId(const domain::CommandSequence commandSequence, const std::size_t eventIndex) {
     if (eventIndex > std::numeric_limits<domain::EventIndex::Underlying>::max()) {
         throw std::logic_error("EventIndex exhausted during one command");
@@ -35,10 +44,20 @@ domain::Side toDomainSide(const sequencer::orderType side) {
 
 } // namespace
 
-MatchingEngine::MatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus)
+MatchingEngine::MatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus,
+                               BoundedCommandResultQueue& commandResultQueue)
     : Task(std::vector<core::SharedQueue<sequencer::sequenceMessage>*>{sequencerQueue}),
       sequencerQueue(*sequencerQueue),
-      multicastBus(multicastBus) {}
+      multicastBus(multicastBus),
+      commandResultQueue(commandResultQueue) {}
+
+MatchingEngine::MatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus,
+                               const std::size_t ownedResultQueueCapacity)
+    : Task(std::vector<core::SharedQueue<sequencer::sequenceMessage>*>{sequencerQueue}),
+      sequencerQueue(*sequencerQueue),
+      multicastBus(multicastBus),
+      ownedCommandResultQueue(std::make_unique<BoundedCommandResultQueue>(ownedResultQueueCapacity)),
+      commandResultQueue(*ownedCommandResultQueue) {}
 
 void MatchingEngine::run() {
     std::cout << "[MatchingEngine] Thread started" << std::endl;
@@ -55,17 +74,37 @@ void MatchingEngine::send(sequencer::sequenceMessage& message) {
 
 void MatchingEngine::drainQueue(core::SharedQueue<sequencer::sequenceMessage>& queue, const char* source,
                                 std::size_t index) {
+    if (!handoffPendingResult()) {
+        return;
+    }
+
     while (!queue.empty()) {
         sequencer::sequenceMessage message{};
         if (!queue.pop(message)) {
             return;
         }
 
-        const ProcessingOutcome outcome = processMessage(message);
-        static_cast<void>(outcome);
+        ProcessingOutcome outcome = processMessage(message);
+        ImmutableCommandResultBatch batch = std::make_shared<const CommandResultBatch>(
+            message.globalSequenceNumber, outcome.result, std::move(outcome.events));
 
         send(message);
+        if (!commandResultQueue.tryPush(batch)) {
+            pendingCommandResult = std::move(batch);
+            return;
+        }
     }
+}
+
+bool MatchingEngine::handoffPendingResult() {
+    if (pendingCommandResult == nullptr) {
+        return true;
+    }
+    if (!commandResultQueue.tryPush(pendingCommandResult)) {
+        return false;
+    }
+    pendingCommandResult.reset();
+    return true;
 }
 
 MatchingEngine::ProcessingOutcome MatchingEngine::processBuyOrder(const sequencer::sequenceMessage& message) {
@@ -134,11 +173,15 @@ MatchingEngine::ProcessingOutcome MatchingEngine::processCancel(const sequencer:
 MatchingEngine::ProcessingOutcome MatchingEngine::processOrder(const sequencer::sequenceMessage& message,
                                                                const bool restRemainder) {
     const MatchPlan plan = planMatches(message);
+    const std::size_t plannedEventCount =
+        checkedAddEventCount(plan.executionCount, plan.remainder.value() > 0 ? 1u : 0u);
+    if (plannedEventCount > MAX_EVENTS_PER_COMMAND) {
+        return rejectBookCapacity(message);
+    }
     if (restRemainder && !canAddOrder(message, plan.remainder)) {
         return rejectBookCapacity(message);
     }
 
-    const std::size_t plannedEventCount = plan.executionCount + (plan.remainder.value() > 0 ? 1u : 0u);
     if (plannedEventCount > 0) {
         static_cast<void>(makeEventId(message.globalSequenceNumber, plannedEventCount - 1));
     }
@@ -224,6 +267,7 @@ MatchingEngine::ProcessingOutcome MatchingEngine::rejectBookCapacity(const seque
     }
 
     std::vector<domain::BusinessEvent> events;
+    events.reserve(1);
     events.emplace_back(domain::CommandRejected{
         .eventId =
             domain::EventId{
@@ -420,7 +464,7 @@ MatchingEngine::MatchPlan MatchingEngine::planMatches(const sequencer::sequenceM
                 }
                 const uint64_t tradeQuantity = std::min(plan.remainder.value(), order.remainingQuantity.value());
                 plan.remainder = domain::Quantity{plan.remainder.value() - tradeQuantity};
-                ++plan.executionCount;
+                plan.executionCount = checkedAddEventCount(plan.executionCount, 1);
             }
         }
     };
