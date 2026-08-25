@@ -37,6 +37,9 @@ public:
     domain::CommandSequence getNextGlobalSequenceNumber(const sequenceMessage& message);
     uint64_t getNextTopicSequenceNumber(const sequenceMessage& message);
 
+protected:
+    bool processNext();
+
 private:
     void convertToSequenceMessage() {}
 

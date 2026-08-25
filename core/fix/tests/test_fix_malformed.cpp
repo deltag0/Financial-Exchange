@@ -1,5 +1,6 @@
 #include "fix_parser.hpp"
 #include "fix_task.hpp"
+#include "fix_test_identities.hpp"
 #include <gtest/gtest.h>
 
 using namespace exchange::sequencer;
@@ -18,14 +19,15 @@ TEST(FixMalformed, MalformedNumericFieldsThrow) {
     msg.setField(FIX::StringField(44, "nope"));
 
     FIX::SessionID sid("FIX.4.4", "S", "T");
-    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, 1), std::exception);
+    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, exchange::core::fix::test::clientIdentityResolver(), 1),
+                 std::exception);
 }
 
 TEST(FixMalformed, FixTaskFromAppHandlesMalformed) {
     exchange::core::SharedQueue<sequenceMessage> q(4);
     std::vector<exchange::core::SharedQueue<sequenceMessage>*> shards{&q};
     exchange::core::Bus bus(8);
-    FixTask fix_task(shards, bus);
+    FixTask fix_task(shards, bus, exchange::core::fix::test::clientIdentityResolver());
 
     FIX::Message msg;
     msg.getHeader().setField(FIX::MsgType("D"));
@@ -56,7 +58,8 @@ TEST(FixMalformed, UnknownOverlongSymbolIsRejected) {
     msg.setField(FIX::TimeInForce(FIX::TimeInForce_GOOD_TILL_CANCEL));
 
     FIX::SessionID sid("FIX.4.4", "S", "T");
-    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, 4), exchange::core::fix::FixValidationError);
+    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, exchange::core::fix::test::clientIdentityResolver(), 4),
+                 exchange::core::fix::FixValidationError);
 }
 
 TEST(FixMalformed, UnknownNonAsciiSymbolIsRejected) {
@@ -72,5 +75,6 @@ TEST(FixMalformed, UnknownNonAsciiSymbolIsRejected) {
     msg.setField(FIX::TimeInForce(FIX::TimeInForce_GOOD_TILL_CANCEL));
 
     FIX::SessionID sid("FIX.4.4", "S", "T");
-    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, 2), exchange::core::fix::FixValidationError);
+    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, exchange::core::fix::test::clientIdentityResolver(), 2),
+                 exchange::core::fix::FixValidationError);
 }

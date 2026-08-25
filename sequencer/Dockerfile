@@ -18,6 +18,7 @@ WORKDIR /app
 
 # Copy essential project files for building
 COPY CMakeLists.txt .
+COPY exchange.cfg .
 COPY core/ ./core/
 COPY sequencer/ ./sequencer/
 COPY matching_engine/ ./matching_engine/
