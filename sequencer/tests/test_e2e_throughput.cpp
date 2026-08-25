@@ -35,17 +35,8 @@ namespace {
 class TestableSequencer : public sequencer::Sequencer {
 public:
     using sequencer::Sequencer::Sequencer;
-    void processOnce() {
-        if (!mq_shards.empty() && !mq_shards[0]->empty()) {
-            sequencer::sequenceMessage message;
-            if (mq_shards[0]->pop(message)) {
-                message.globalSequenceNumber = getNextGlobalSequenceNumber(message);
-                message.topicSequenceNumber = getNextTopicSequenceNumber(message);
-                if (mq_shards[0] && !mq_shards[0]->empty()) {
-                    // Process next in queue
-                }
-            }
-        }
+    bool processOnce() {
+        return processNext();
     }
 };
 
@@ -57,7 +48,191 @@ public:
         drainQueue(sequencerQueue, "Sequencer");
     }
 };
+
+FIX::Message makeFixNewOrder(const std::string& clientCommandId) {
+    FIX::Message message;
+    message.getHeader().setField(FIX::MsgType("D"));
+    message.setField(FIX::ClOrdID(clientCommandId));
+    message.setField(FIX::Symbol("SPY"));
+    message.setField(FIX::Side(FIX::Side_BUY));
+    message.setField(FIX::OrderQty(10));
+    message.setField(FIX::Price(100.0));
+    message.setField(FIX::OrdType(FIX::OrdType_LIMIT));
+    message.setField(FIX::TimeInForce(FIX::TimeInForce_GOOD_TILL_CANCEL));
+    return message;
+}
+
+FIX::Message makeFixCancel(const std::string& clientCommandId, const std::string& orderId) {
+    FIX::Message message;
+    message.getHeader().setField(FIX::MsgType("F"));
+    message.setField(FIX::ClOrdID(clientCommandId));
+    message.setField(FIX::StringField(FIX::FIELD::OrderID, orderId));
+    message.setField(FIX::OrigClOrdID("UNRELATED-PROTOCOL-CORRELATION"));
+    message.setField(FIX::Symbol("SPY"));
+    return message;
+}
 } // namespace
+
+TEST(SequencerCancelNormalizationTest, ValidFixCancelGetsDistinctSequenceAndReachesMatching) {
+    core::SharedQueue<sequencer::sequenceMessage> shardQueue(16);
+    core::SharedQueue<sequencer::sequenceMessage> matchingQueue(16);
+    std::vector<core::SharedQueue<sequencer::sequenceMessage>*> shardQueues{&shardQueue};
+    core::Bus bus(16);
+    const FIX::SessionID session("FIX.4.4", "CANCEL-CLIENT", "EXCHANGE");
+    const core::fix::ClientIdentityResolver clientIdentityResolver({{session, domain::ClientId{500}}});
+    core::task::FixTask fixTask(shardQueues, bus, clientIdentityResolver);
+    TestableSequencer sequencer(shardQueues, &matchingQueue);
+    matching_engine::BoundedCommandResultQueue resultQueue(4);
+    TestableMatchingEngine matchingEngine(&matchingQueue, bus, resultQueue);
+
+    fixTask.fromApp(makeFixNewOrder("NEW-1"), session);
+    sequencer::sequenceMessage normalizedNew{};
+    ASSERT_TRUE(fixTask.getFixMessageQueue()->pop(normalizedNew));
+    fixTask.sendSequencerMessage(normalizedNew);
+    ASSERT_TRUE(sequencer.processOnce());
+
+    sequencer::sequenceMessage sequencedNew{};
+    ASSERT_TRUE(matchingQueue.pop(sequencedNew));
+    EXPECT_EQ(sequencedNew.globalSequenceNumber, domain::CommandSequence{1});
+    EXPECT_EQ(sequencedNew.orderId, domain::OrderId{1});
+    ASSERT_TRUE(matchingQueue.push(sequencedNew));
+    matchingEngine.invokeDrain();
+    matching_engine::ImmutableCommandResultBatch newResult;
+    ASSERT_TRUE(resultQueue.tryPop(newResult));
+    ASSERT_EQ(newResult->events().size(), 1u);
+    ASSERT_NE(std::get_if<domain::OrderRested>(&newResult->events().front()), nullptr);
+
+    fixTask.fromApp(makeFixCancel("INVALID-CANCEL", "0"), session);
+    sequencer::sequenceMessage rejectedCancel{};
+    EXPECT_FALSE(fixTask.getFixMessageQueue()->pop(rejectedCancel));
+    EXPECT_FALSE(sequencer.processOnce());
+
+    fixTask.fromApp(makeFixCancel("CANCEL-2", "1"), session);
+    sequencer::sequenceMessage normalizedCancel{};
+    ASSERT_TRUE(fixTask.getFixMessageQueue()->pop(normalizedCancel));
+    EXPECT_EQ(normalizedCancel.globalSequenceNumber, domain::CommandSequence{});
+    EXPECT_EQ(normalizedCancel.orderId, domain::OrderId{});
+    EXPECT_EQ(normalizedCancel.targetOrderId, std::optional<domain::TargetOrderId>{domain::TargetOrderId{1}});
+    fixTask.sendSequencerMessage(normalizedCancel);
+    ASSERT_TRUE(sequencer.processOnce());
+
+    sequencer::sequenceMessage sequencedCancel{};
+    ASSERT_TRUE(matchingQueue.pop(sequencedCancel));
+    EXPECT_EQ(sequencedCancel.globalSequenceNumber, domain::CommandSequence{2});
+    EXPECT_NE(sequencedCancel.globalSequenceNumber, sequencedNew.globalSequenceNumber);
+    EXPECT_EQ(sequencedCancel.orderId, domain::OrderId{});
+    EXPECT_EQ(sequencedCancel.targetOrderId, normalizedCancel.targetOrderId);
+    ASSERT_TRUE(matchingQueue.push(sequencedCancel));
+    matchingEngine.invokeDrain();
+
+    matching_engine::ImmutableCommandResultBatch cancelResult;
+    ASSERT_TRUE(resultQueue.tryPop(cancelResult));
+    EXPECT_EQ(cancelResult->commandSequence(), domain::CommandSequence{2});
+    ASSERT_EQ(cancelResult->events().size(), 1u);
+    const auto* cancelled = std::get_if<domain::OrderCancelled>(&cancelResult->events().front());
+    ASSERT_NE(cancelled, nullptr);
+    EXPECT_EQ(cancelled->orderId, domain::OrderId{1});
+    EXPECT_EQ(cancelled->cancelledQuantity, domain::Quantity{10});
+    EXPECT_EQ(cancelled->reason, domain::CancelReason::CLIENT_REQUESTED);
+}
+
+TEST(SequencerClientIdentityTest, OwnershipUsesConfiguredClientIdDespiteChangedAndCollidingLegacyPorts) {
+    core::SharedQueue<sequencer::sequenceMessage> shardQueue(16);
+    core::SharedQueue<sequencer::sequenceMessage> matchingQueue(16);
+    std::vector<core::SharedQueue<sequencer::sequenceMessage>*> shardQueues{&shardQueue};
+    core::Bus bus(16);
+    const FIX::SessionID primarySession("FIX.4.4", "EXCHANGE", "CLIENT-A");
+    const FIX::SessionID alternateSession("FIX.4.4", "EXCHANGE", "CLIENT-A-ALT");
+    const FIX::SessionID otherClientSession("FIX.4.4", "EXCHANGE", "CLIENT-B");
+    const FIX::SessionID unknownSession("FIX.4.4", "EXCHANGE", "UNKNOWN");
+    const core::fix::ClientIdentityResolver clientIdentityResolver({
+        {primarySession, domain::ClientId{7001}},
+        {alternateSession, domain::ClientId{7001}},
+        {otherClientSession, domain::ClientId{8002}},
+    });
+    core::task::FixTask fixTask(shardQueues, bus, clientIdentityResolver);
+    TestableSequencer sequencer(shardQueues, &matchingQueue);
+    matching_engine::BoundedCommandResultQueue resultQueue(8);
+    TestableMatchingEngine matchingEngine(&matchingQueue, bus, resultQueue);
+
+    const auto normalizeAndSequence =
+        [&](const FIX::Message& message, const FIX::SessionID& session,
+            const std::uint64_t forcedLegacyPort) -> std::optional<sequencer::sequenceMessage> {
+        fixTask.fromApp(message, session);
+        sequencer::sequenceMessage normalized{};
+        if (!fixTask.getFixMessageQueue()->pop(normalized)) {
+            return std::nullopt;
+        }
+        normalized.port = forcedLegacyPort;
+        fixTask.sendSequencerMessage(normalized);
+        if (!sequencer.processOnce()) {
+            return std::nullopt;
+        }
+        sequencer::sequenceMessage sequenced{};
+        if (!matchingQueue.pop(sequenced)) {
+            return std::nullopt;
+        }
+        return sequenced;
+    };
+    const auto match = [&](const sequencer::sequenceMessage& command) -> matching_engine::ImmutableCommandResultBatch {
+        if (!matchingQueue.push(command)) {
+            return {};
+        }
+        matchingEngine.invokeDrain();
+        matching_engine::ImmutableCommandResultBatch result;
+        if (!resultQueue.tryPop(result)) {
+            return {};
+        }
+        return result;
+    };
+
+    const auto firstNew = normalizeAndSequence(makeFixNewOrder("NEW-1"), primarySession, 111);
+    ASSERT_TRUE(firstNew.has_value());
+    EXPECT_EQ(firstNew->globalSequenceNumber, domain::CommandSequence{1});
+    EXPECT_EQ(firstNew->orderId, domain::OrderId{1});
+    EXPECT_EQ(firstNew->clientId, domain::ClientId{7001});
+    ASSERT_TRUE(match(*firstNew));
+
+    const auto secondNew = normalizeAndSequence(makeFixNewOrder("NEW-2"), primarySession, 222);
+    ASSERT_TRUE(secondNew.has_value());
+    EXPECT_EQ(secondNew->globalSequenceNumber, domain::CommandSequence{2});
+    EXPECT_EQ(secondNew->orderId, domain::OrderId{2});
+    EXPECT_EQ(secondNew->clientId, domain::ClientId{7001});
+    ASSERT_TRUE(match(*secondNew));
+
+    fixTask.fromApp(makeFixCancel("UNKNOWN", "1"), unknownSession);
+    sequencer::sequenceMessage rejectedIdentity{};
+    EXPECT_FALSE(fixTask.getFixMessageQueue()->pop(rejectedIdentity));
+    EXPECT_FALSE(sequencer.processOnce());
+    EXPECT_TRUE(matchingQueue.empty());
+
+    const auto alternateCancel = normalizeAndSequence(makeFixCancel("ALT-CANCEL", "1"), alternateSession, 333);
+    ASSERT_TRUE(alternateCancel.has_value());
+    EXPECT_EQ(alternateCancel->globalSequenceNumber, domain::CommandSequence{3});
+    EXPECT_EQ(alternateCancel->orderId, domain::OrderId{});
+    EXPECT_EQ(alternateCancel->targetOrderId, std::optional<domain::TargetOrderId>{domain::TargetOrderId{1}});
+    EXPECT_EQ(alternateCancel->clientId, domain::ClientId{7001});
+    EXPECT_NE(alternateCancel->port, firstNew->port);
+    const matching_engine::ImmutableCommandResultBatch alternateResult = match(*alternateCancel);
+    ASSERT_TRUE(alternateResult);
+    ASSERT_EQ(alternateResult->events().size(), 1u);
+    const auto* cancelled = std::get_if<domain::OrderCancelled>(&alternateResult->events().front());
+    ASSERT_NE(cancelled, nullptr);
+    EXPECT_EQ(cancelled->reason, domain::CancelReason::CLIENT_REQUESTED);
+
+    const auto otherClientCancel =
+        normalizeAndSequence(makeFixCancel("OTHER-CANCEL", "2"), otherClientSession, alternateCancel->port);
+    ASSERT_TRUE(otherClientCancel.has_value());
+    EXPECT_EQ(otherClientCancel->globalSequenceNumber, domain::CommandSequence{4});
+    EXPECT_EQ(otherClientCancel->clientId, domain::ClientId{8002});
+    EXPECT_EQ(otherClientCancel->port, alternateCancel->port);
+    const matching_engine::ImmutableCommandResultBatch otherResult = match(*otherClientCancel);
+    ASSERT_TRUE(otherResult);
+    ASSERT_EQ(otherResult->events().size(), 1u);
+    const auto* rejected = std::get_if<domain::CommandRejected>(&otherResult->events().front());
+    ASSERT_NE(rejected, nullptr);
+    EXPECT_EQ(rejected->reason, domain::CommandRejectionReason::NOT_OWNER);
+}
 
 TEST(E2EThroughputTest, SequencerToMatchingEngineThroughput) {
     // Test: Measure throughput from Sequencer → MatchingEngine (excluding FIX parsing)
@@ -204,7 +379,9 @@ TEST(E2EThroughputTest, FullPipelineWithFixParsing) {
     matching_engine::BoundedCommandResultQueue command_result_queue(queue_size);
 
     // Create FixTask
-    core::task::FixTask fix_task(sequencer_queues, multicast_bus);
+    const FIX::SessionID sessionID("FIX.4.4", "SENDER", "TARGET");
+    const core::fix::ClientIdentityResolver clientIdentityResolver({{sessionID, domain::ClientId{600}}});
+    core::task::FixTask fix_task(sequencer_queues, multicast_bus, clientIdentityResolver);
     auto fix_queue = fix_task.getFixMessageQueue();
 
     // Create sequencer and matching engine
@@ -274,9 +451,6 @@ TEST(E2EThroughputTest, FullPipelineWithFixParsing) {
     auto start = std::chrono::high_resolution_clock::now();
     auto end_time = start + std::chrono::seconds(1);
     int fix_messages_injected = 0;
-
-    // Create a dummy session ID for FIX messages
-    FIX::SessionID sessionID("FIX.4.4", "SENDER", "TARGET");
 
     while (std::chrono::high_resolution_clock::now() < end_time) {
         // Create a FIX NewOrderSingle message

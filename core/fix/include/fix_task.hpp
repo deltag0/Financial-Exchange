@@ -36,12 +36,13 @@ struct InternalQueues {
 };
 
 class FixTask : public FIX::Application, public Task<sequencer::sequenceMessage> {
-  public:
-    FixTask(const std::vector<core::SharedQueue<sequencer::sequenceMessage> *> &sequencerQueues,
-            Bus &multicastBus)
-        : Task<sequencer::sequenceMessage>(sequencerQueues), multicastBus(multicastBus) {
-        internalQueues.fixMessageQueue =
-            std::make_unique<core::SharedQueue<sequencer::sequenceMessage>>(1000);
+public:
+    FixTask(const std::vector<core::SharedQueue<sequencer::sequenceMessage> *> &sequencerQueues, Bus &multicastBus,
+            const fix::ClientIdentityResolver &clientIdentityResolver)
+        : Task<sequencer::sequenceMessage>(sequencerQueues),
+          multicastBus(multicastBus),
+          clientIdentityResolver(clientIdentityResolver) {
+        internalQueues.fixMessageQueue = std::make_unique<core::SharedQueue<sequencer::sequenceMessage>>(1000);
 
         multicastBus.registerCursor(cursor);
     }
@@ -64,11 +65,13 @@ class FixTask : public FIX::Application, public Task<sequencer::sequenceMessage>
     void run() override;
     void send(sequencer::sequenceMessage &message) override;
 
-  private:
+private:
     // Internal Queues to process bursts of messages from FIX sessions and internal business
     // messages
     InternalQueues internalQueues;
     Bus &multicastBus;
+    // The exchange composition root owns this immutable resolver and outlives FixTask.
+    const fix::ClientIdentityResolver &clientIdentityResolver;
     std::atomic<Bus::cursor_type> cursor{0};
 };
 

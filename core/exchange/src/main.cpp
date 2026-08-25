@@ -31,6 +31,7 @@ int main() {
               << std::endl;
     try {
         FIX::SessionSettings settings("/app/exchange.cfg");
+        const exchange::core::fix::ClientIdentityResolver clientIdentityResolver(settings);
 
         std::vector<
             std::unique_ptr<exchange::core::SharedQueue<exchange::sequencer::sequenceMessage>>>
@@ -52,7 +53,7 @@ int main() {
         exchange::matching_engine::BoundedCommandResultQueue commandResultQueue(COMMAND_RESULT_QUEUE_SIZE);
 
         // Initialize FIX Application with all shards
-        exchange::core::task::FixTask application(shard_queue_ptrs, multicastBus);
+        exchange::core::task::FixTask application(shard_queue_ptrs, multicastBus, clientIdentityResolver);
 
         exchange::matching_engine::MatchingEngine matching_engine(matching_engine_queue.get(), multicastBus,
                                                                   commandResultQueue);

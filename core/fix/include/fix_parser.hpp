@@ -1,5 +1,7 @@
 #pragma once
 
+#include "client_identity.hpp"
+
 #include "../../../sequencer/include/sequencer.hpp"
 #include "../../shared_queue/include/shared_queue.hpp"
 
@@ -35,11 +37,13 @@ class FixValidationError : public std::runtime_error {
  * Parses a FIX message and converts it to a sequencer message
  * @param fixMessage The incoming FIX message
  * @param sessionID The FIX session ID
+ * @param clientIdentityResolver Stable configured FIX-session-to-client mapping
  * @param numShards The total number of message queue shards
  * @return A sequenceMessage ready to be queued, or empty if message type is not supported
  */
-exchange::sequencer::sequenceMessage
-parseFixMessage(const FIX::Message &fixMessage, const FIX::SessionID &sessionID, size_t numShards);
+exchange::sequencer::sequenceMessage parseFixMessage(const FIX::Message &fixMessage, const FIX::SessionID &sessionID,
+                                                     const ClientIdentityResolver &clientIdentityResolver,
+                                                     size_t numShards);
 
 /**
  * Determines if a message is a type we should process (New Order or Cancel Order)

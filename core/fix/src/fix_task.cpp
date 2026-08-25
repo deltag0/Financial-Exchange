@@ -38,7 +38,7 @@ void FixTask::fromApp(const FIX::Message &message, const FIX::SessionID &session
         }
 
         internalQueues.fixMessageQueue->push(
-            fix::parseFixMessage(message, sessionID, mq_shards.size()));
+            fix::parseFixMessage(message, sessionID, clientIdentityResolver, mq_shards.size()));
 
     } catch (const FIX::FieldNotFound &e) {
         std::cerr << "[FixTask] Required field missing: " << e.field << std::endl;

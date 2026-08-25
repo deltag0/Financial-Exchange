@@ -1,5 +1,6 @@
 #include "fix_parser.hpp"
 #include "fix_task.hpp"
+#include "fix_test_identities.hpp"
 #include <gtest/gtest.h>
 
 using namespace exchange::core::task;
@@ -13,7 +14,7 @@ TEST(FixTaskTest, FromAppPushesToQueue) {
 
     exchange::core::Bus bus(8);
 
-    FixTask fix_task(sequencer_queues, bus);
+    FixTask fix_task(sequencer_queues, bus, exchange::core::fix::test::clientIdentityResolver());
 
     // Build a simple NewOrderSingle
     FIX::Message msg;

@@ -1,4 +1,5 @@
 #include "fix_parser.hpp"
+#include "fix_test_identities.hpp"
 #include <gtest/gtest.h>
 
 using namespace exchange::core::fix;
@@ -40,7 +41,7 @@ TEST(FixParserTest, ParseNewOrderSingle) {
     msg.setField(FIX::TimeInForce(FIX::TimeInForce_GOOD_TILL_CANCEL));
 
     FIX::SessionID sid("FIX.4.4", "SENDER", "TARGET");
-    auto seq = parseFixMessage(msg, sid, 4);
+    auto seq = parseFixMessage(msg, sid, test::clientIdentityResolver(), 4);
 
     EXPECT_EQ(seq.type, orderType::BUY);
     EXPECT_EQ(seq.quantity.value(), 100);
@@ -59,13 +60,14 @@ TEST(FixParserTest, ParseNewOrderSingle) {
 TEST(FixParserTest, SpyV1AcceptsExactNumericBoundariesAndEquivalentDecimals) {
     const FIX::SessionID session("FIX.4.4", "SENDER", "TARGET");
 
-    const auto maximum = parseFixMessage(makeSpyOrder("100000000.0", "1000000.0000"), session, 1);
+    const auto maximum =
+        parseFixMessage(makeSpyOrder("100000000.0", "1000000.0000"), session, test::clientIdentityResolver(), 1);
     EXPECT_EQ(maximum.quantity.value(), 100000000u);
     EXPECT_EQ(maximum.price.value(), 10000000000u);
     EXPECT_EQ(maximum.instrumentId.value(), 1u);
     EXPECT_EQ(maximum.configurationVersion, 1u);
 
-    const auto equivalent = parseFixMessage(makeSpyOrder("1", "12.34000"), session, 1);
+    const auto equivalent = parseFixMessage(makeSpyOrder("1", "12.34000"), session, test::clientIdentityResolver(), 1);
     EXPECT_EQ(equivalent.quantity.value(), 1u);
     EXPECT_EQ(equivalent.price.value(), 123400u);
 }
@@ -74,10 +76,13 @@ TEST(FixParserTest, SpyV1RejectsNumericValuesOutsideConfiguredBoundaries) {
     const FIX::SessionID session("FIX.4.4", "SENDER", "TARGET");
 
     for (const std::string price : {"0", "0.00009", "12.34001", "1000000.0001"}) {
-        EXPECT_THROW(parseFixMessage(makeSpyOrder("1", price), session, 1), FixValidationError) << "price=" << price;
+        EXPECT_THROW(parseFixMessage(makeSpyOrder("1", price), session, test::clientIdentityResolver(), 1),
+                     FixValidationError)
+            << "price=" << price;
     }
     for (const std::string quantity : {"0", "1.5", "100000001"}) {
-        EXPECT_THROW(parseFixMessage(makeSpyOrder(quantity, "1.0000"), session, 1), FixValidationError)
+        EXPECT_THROW(parseFixMessage(makeSpyOrder(quantity, "1.0000"), session, test::clientIdentityResolver(), 1),
+                     FixValidationError)
             << "quantity=" << quantity;
     }
 }
@@ -87,7 +92,7 @@ TEST(FixParserTest, RejectsUnknownInstrumentBeforeSequencing) {
     message.setField(FIX::Symbol("TEST"));
 
     const FIX::SessionID session("FIX.4.4", "SENDER", "TARGET");
-    EXPECT_THROW(parseFixMessage(message, session, 1), FixValidationError);
+    EXPECT_THROW(parseFixMessage(message, session, test::clientIdentityResolver(), 1), FixValidationError);
 }
 
 TEST(FixParserTest, AcceptsIocWithoutExpiry) {
@@ -95,7 +100,7 @@ TEST(FixParserTest, AcceptsIocWithoutExpiry) {
     message.setField(FIX::TimeInForce(FIX::TimeInForce_IMMEDIATE_OR_CANCEL));
 
     const FIX::SessionID session("FIX.4.4", "SENDER", "TARGET");
-    const auto sequence = parseFixMessage(message, session, 4);
+    const auto sequence = parseFixMessage(message, session, test::clientIdentityResolver(), 4);
 
     EXPECT_EQ(sequence.tif, TimeInForce::IOC);
     EXPECT_EQ(sequence.expiry, std::chrono::system_clock::time_point{});

@@ -228,13 +228,17 @@ domain::Price extractLimitPrice(const FIX::Message& fixMessage,
     return parsePriceTicks(fixMessage.getField(FIX::FIELD::Price), configuration);
 }
 
-/*
- * FIX OrigClOrdID is a client identifier, not an authoritative exchange
- * OrderId. No adopted lookup currently maps it to TargetOrderId, so FIX cancel
- * normalization must stop before sequencing.
- */
-[[noreturn]] void rejectUnmappedFixCancel() {
-    throw FixValidationError("FIX cancel to TargetOrderId mapping is not implemented");
+domain::TargetOrderId extractTargetOrderId(const FIX::Message& fixMessage) {
+    if (!fixMessage.isSetField(FIX::FIELD::OrderID)) {
+        throw FIX::FieldNotFound(FIX::FIELD::OrderID);
+    }
+
+    const std::uint64_t targetOrderId = parseUnsignedWhole(fixMessage.getField(FIX::FIELD::OrderID),
+                                                           std::numeric_limits<std::uint64_t>::max(), "OrderID");
+    if (targetOrderId == 0) {
+        throw FixValidationError("OrderID must be positive");
+    }
+    return domain::TargetOrderId{targetOrderId};
 }
 
 } /* namespace */
@@ -244,14 +248,20 @@ bool isProcessableMessageType(const std::string& msgType) {
 }
 
 sequencer::sequenceMessage parseFixMessage(const FIX::Message& fixMessage, const FIX::SessionID& sessionID,
-                                           size_t numShards) {
+                                           const ClientIdentityResolver& clientIdentityResolver, size_t numShards) {
     try {
         FIX::MsgType msgType;
         fixMessage.getHeader().getField(msgType);
 
         sequencer::sequenceMessage seqMsg{};
+        const std::optional<domain::ClientId> clientId = clientIdentityResolver.resolve(sessionID);
+        if (!clientId.has_value()) {
+            throw FixValidationError("unknown or unauthorized FIX session identity");
+        }
+        seqMsg.clientId = *clientId;
+
+        // This hash remains only as a legacy transport/topic key. It is not exchange identity.
         seqMsg.port = std::hash<std::string>{}(sessionID.toString());
-        seqMsg.clientId = domain::ClientId{seqMsg.port};
 
         if (numShards == 0) {
             throw FixValidationError("numShards must be greater than zero");
@@ -259,7 +269,7 @@ sequencer::sequenceMessage parseFixMessage(const FIX::Message& fixMessage, const
 
         /* Determine order type based on message type */
         if (msgType.getValue() == "F") {
-            rejectUnmappedFixCancel();
+            seqMsg.type = sequencer::orderType::CANCEL;
         } else if (msgType.getValue() == "D") {
             validateNewOrderType(fixMessage);
             seqMsg.type = extractSide(fixMessage);
@@ -300,7 +310,9 @@ sequencer::sequenceMessage parseFixMessage(const FIX::Message& fixMessage, const
         seqMsg.clientCommandId.emplace(clOrdID.getValue());
         seqMsg.id = std::hash<std::string>{}(clOrdID.getValue());
 
-        if (seqMsg.type != sequencer::orderType::CANCEL) {
+        if (seqMsg.type == sequencer::orderType::CANCEL) {
+            seqMsg.targetOrderId.emplace(extractTargetOrderId(fixMessage));
+        } else {
             seqMsg.tif = extractTimeInForce(fixMessage);
             seqMsg.expiry = validateExpiry(fixMessage);
         }
