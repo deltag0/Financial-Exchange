@@ -99,7 +99,8 @@ TEST(FixTaskClientIdentityTest, UnknownIdentityNeverEntersInternalQueue) {
     core::SharedQueue<sequencer::sequenceMessage> shardQueue(8);
     std::vector<core::SharedQueue<sequencer::sequenceMessage>*> shardQueues{&shardQueue};
     core::Bus bus(8);
-    task::FixTask fixTask(shardQueues, bus, identityResolver());
+    admission::CommandAdmissionIndex admissionIndex(8);
+    task::FixTask fixTask(shardQueues, bus, identityResolver(), admissionIndex);
 
     fixTask.fromApp(makeNewOrder("UNKNOWN"), UNKNOWN_SESSION);
 

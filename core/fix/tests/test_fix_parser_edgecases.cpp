@@ -219,8 +219,9 @@ TEST(FixTaskEdgeCases, NonProcessableMessageDoesNotPush) {
     std::vector<exchange::core::SharedQueue<sequenceMessage>*> sequencer_queues;
     sequencer_queues.push_back(&seq_q);
     exchange::core::Bus bus(8);
+    exchange::core::admission::CommandAdmissionIndex admissionIndex(8);
 
-    FixTask fix_task(sequencer_queues, bus, exchange::core::fix::test::clientIdentityResolver());
+    FixTask fix_task(sequencer_queues, bus, exchange::core::fix::test::clientIdentityResolver(), admissionIndex);
 
     FIX::Message msg;
     msg.getHeader().setField(FIX::MsgType("Z"));
@@ -237,8 +238,9 @@ TEST(FixTaskEdgeCases, FromAppHandlesMissingHeader) {
     std::vector<exchange::core::SharedQueue<sequenceMessage>*> sequencer_queues;
     sequencer_queues.push_back(&seq_q);
     exchange::core::Bus bus(8);
+    exchange::core::admission::CommandAdmissionIndex admissionIndex(8);
 
-    FixTask fix_task(sequencer_queues, bus, exchange::core::fix::test::clientIdentityResolver());
+    FixTask fix_task(sequencer_queues, bus, exchange::core::fix::test::clientIdentityResolver(), admissionIndex);
 
     FIX::Message msg; // no MsgType header
     FIX::SessionID sid("FIX.4.4", "S", "T");
@@ -254,8 +256,9 @@ TEST(FixTaskCancelNormalizationTest, ValidCancelEntersInternalQueueWithExactTarg
     std::vector<exchange::core::SharedQueue<sequenceMessage>*> sequencer_queues;
     sequencer_queues.push_back(&seq_q);
     exchange::core::Bus bus(8);
+    exchange::core::admission::CommandAdmissionIndex admissionIndex(8);
 
-    FixTask fix_task(sequencer_queues, bus, exchange::core::fix::test::clientIdentityResolver());
+    FixTask fix_task(sequencer_queues, bus, exchange::core::fix::test::clientIdentityResolver(), admissionIndex);
 
     FIX::Message msg = makeValidCancel("18446744073709551615", "CXL42", "NOT-AN-ORDER-ID");
     FIX::SessionID sid("FIX.4.4", "S", "T");
@@ -277,7 +280,8 @@ TEST(FixTaskCancelNormalizationTest, InvalidCancelNeverEntersInternalQueue) {
     exchange::core::SharedQueue<sequenceMessage> seq_q(8);
     std::vector<exchange::core::SharedQueue<sequenceMessage>*> sequencer_queues{&seq_q};
     exchange::core::Bus bus(8);
-    FixTask fix_task(sequencer_queues, bus, exchange::core::fix::test::clientIdentityResolver());
+    exchange::core::admission::CommandAdmissionIndex admissionIndex(8);
+    FixTask fix_task(sequencer_queues, bus, exchange::core::fix::test::clientIdentityResolver(), admissionIndex);
     const FIX::SessionID session("FIX.4.4", "S", "T");
 
     for (const std::string orderId : {"", "0", "-1", " 1", "abc", "18446744073709551616"}) {
@@ -337,7 +341,8 @@ TEST(FixTaskValidation, InvalidOrderDoesNotPushToQueue) {
     exchange::core::SharedQueue<sequenceMessage> seq_q(8);
     std::vector<exchange::core::SharedQueue<sequenceMessage>*> sequencer_queues{&seq_q};
     exchange::core::Bus bus(8);
-    FixTask fix_task(sequencer_queues, bus, exchange::core::fix::test::clientIdentityResolver());
+    exchange::core::admission::CommandAdmissionIndex admissionIndex(8);
+    FixTask fix_task(sequencer_queues, bus, exchange::core::fix::test::clientIdentityResolver(), admissionIndex);
 
     FIX::Message msg;
     msg.getHeader().setField(FIX::MsgType("D"));

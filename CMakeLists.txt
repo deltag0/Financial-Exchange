@@ -24,12 +24,14 @@ endif()
 # --- Core Setup ---
 # core is a library that includes header-only components and FIX implementations
 add_library(core_lib
+    core/admission/src/command_admission.cpp
     core/fix/src/client_identity.cpp
     core/fix/src/fix_task.cpp
     core/fix/src/fix_parser.cpp
 )
 target_include_directories(core_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/core/domain/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/admission/include
     ${CMAKE_CURRENT_SOURCE_DIR}/core/shared_queue/include
     ${CMAKE_CURRENT_SOURCE_DIR}/core/bus/include
     ${CMAKE_CURRENT_SOURCE_DIR}/core/fix/include
@@ -39,6 +41,7 @@ target_include_directories(core_lib PUBLIC
 target_link_libraries(core_lib PUBLIC Boost::headers ${QUICKFIX_LIB})
 
 # --- Subdirectories ---
+add_subdirectory(core/admission)
 add_subdirectory(matching_engine)
 add_subdirectory(sequencer)
 add_subdirectory(core/fix)

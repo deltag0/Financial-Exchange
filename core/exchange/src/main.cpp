@@ -24,6 +24,7 @@
 
 #define NUM_SHARDS 4
 #define BUS_SIZE 16384
+#define COMMAND_ADMISSION_CAPACITY 100000
 #define COMMAND_RESULT_QUEUE_SIZE 1000
 
 int main() {
@@ -50,10 +51,12 @@ int main() {
         }
 
         exchange::core::Bus multicastBus(BUS_SIZE);
+        exchange::core::admission::CommandAdmissionIndex commandAdmissionIndex(COMMAND_ADMISSION_CAPACITY);
         exchange::matching_engine::BoundedCommandResultQueue commandResultQueue(COMMAND_RESULT_QUEUE_SIZE);
 
         // Initialize FIX Application with all shards
-        exchange::core::task::FixTask application(shard_queue_ptrs, multicastBus, clientIdentityResolver);
+        exchange::core::task::FixTask application(shard_queue_ptrs, multicastBus, clientIdentityResolver,
+                                                  commandAdmissionIndex);
 
         exchange::matching_engine::MatchingEngine matching_engine(matching_engine_queue.get(), multicastBus,
                                                                   commandResultQueue);
