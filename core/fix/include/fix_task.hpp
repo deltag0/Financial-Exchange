@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../admission/include/command_admission.hpp"
 #include "../../bus/include/bus.hpp"
 #include "../../shared_queue/include/shared_queue.hpp"
 #include "../../task/include/task.hpp"
@@ -38,10 +39,12 @@ struct InternalQueues {
 class FixTask : public FIX::Application, public Task<sequencer::sequenceMessage> {
 public:
     FixTask(const std::vector<core::SharedQueue<sequencer::sequenceMessage> *> &sequencerQueues, Bus &multicastBus,
-            const fix::ClientIdentityResolver &clientIdentityResolver)
+            const fix::ClientIdentityResolver &clientIdentityResolver,
+            admission::CommandAdmissionIndex &commandAdmissionIndex)
         : Task<sequencer::sequenceMessage>(sequencerQueues),
           multicastBus(multicastBus),
-          clientIdentityResolver(clientIdentityResolver) {
+          clientIdentityResolver(clientIdentityResolver),
+          commandAdmissionIndex(commandAdmissionIndex) {
         internalQueues.fixMessageQueue = std::make_unique<core::SharedQueue<sequencer::sequenceMessage>>(1000);
 
         multicastBus.registerCursor(cursor);
@@ -70,8 +73,9 @@ private:
     // messages
     InternalQueues internalQueues;
     Bus &multicastBus;
-    // The exchange composition root owns this immutable resolver and outlives FixTask.
+    // The exchange composition root owns both shared services and outlives FixTask.
     const fix::ClientIdentityResolver &clientIdentityResolver;
+    admission::CommandAdmissionIndex &commandAdmissionIndex;
     std::atomic<Bus::cursor_type> cursor{0};
 };
 

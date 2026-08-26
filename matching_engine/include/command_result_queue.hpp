@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../core/domain/include/business_events.hpp"
+#include "../../core/domain/include/command_result_fwd.hpp"
 
 #include <cstddef>
 #include <deque>
@@ -45,8 +46,6 @@ private:
     ProcessingResult result_;
     std::vector<domain::BusinessEvent> events_;
 };
-
-using ImmutableCommandResultBatch = std::shared_ptr<const CommandResultBatch>;
 
 class BoundedCommandResultQueue final {
 public:

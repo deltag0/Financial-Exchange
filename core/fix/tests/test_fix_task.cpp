@@ -13,8 +13,9 @@ TEST(FixTaskTest, FromAppPushesToQueue) {
     sequencer_queues.push_back(&seq_q);
 
     exchange::core::Bus bus(8);
+    exchange::core::admission::CommandAdmissionIndex admissionIndex(8);
 
-    FixTask fix_task(sequencer_queues, bus, exchange::core::fix::test::clientIdentityResolver());
+    FixTask fix_task(sequencer_queues, bus, exchange::core::fix::test::clientIdentityResolver(), admissionIndex);
 
     // Build a simple NewOrderSingle
     FIX::Message msg;

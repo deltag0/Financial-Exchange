@@ -27,7 +27,8 @@ TEST(FixMalformed, FixTaskFromAppHandlesMalformed) {
     exchange::core::SharedQueue<sequenceMessage> q(4);
     std::vector<exchange::core::SharedQueue<sequenceMessage>*> shards{&q};
     exchange::core::Bus bus(8);
-    FixTask fix_task(shards, bus, exchange::core::fix::test::clientIdentityResolver());
+    exchange::core::admission::CommandAdmissionIndex admissionIndex(8);
+    FixTask fix_task(shards, bus, exchange::core::fix::test::clientIdentityResolver(), admissionIndex);
 
     FIX::Message msg;
     msg.getHeader().setField(FIX::MsgType("D"));

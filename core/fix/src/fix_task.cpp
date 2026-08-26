@@ -3,6 +3,25 @@
 #include <iostream>
 
 namespace exchange::core::task {
+namespace {
+
+const char *admissionStatusName(const admission::AdmissionStatus status) {
+    switch (status) {
+        case admission::AdmissionStatus::FIRST_SUBMISSION:
+            return "FirstSubmission";
+        case admission::AdmissionStatus::IDENTICAL_IN_FLIGHT:
+            return "IdenticalInFlight";
+        case admission::AdmissionStatus::IDENTICAL_COMPLETED:
+            return "IdenticalCompleted";
+        case admission::AdmissionStatus::CONFLICTING_REUSE:
+            return "DuplicateCommandConflict";
+        case admission::AdmissionStatus::ADMISSION_UNAVAILABLE:
+            return "AdmissionUnavailable";
+    }
+    return "UnknownAdmissionStatus";
+}
+
+} // namespace
 
 void FixTask::onCreate(const FIX::SessionID &sessionID) {
     std::cout << "[FixTask] Session created: " << sessionID << std::endl;
@@ -37,8 +56,19 @@ void FixTask::fromApp(const FIX::Message &message, const FIX::SessionID &session
             return;
         }
 
-        internalQueues.fixMessageQueue->push(
-            fix::parseFixMessage(message, sessionID, clientIdentityResolver, mq_shards.size()));
+        sequencer::sequenceMessage normalized =
+            fix::parseFixMessage(message, sessionID, clientIdentityResolver, mq_shards.size());
+        const admission::AdmissionDecision decision = commandAdmissionIndex.reserve(normalized);
+        if (decision.status != admission::AdmissionStatus::FIRST_SUBMISSION) {
+            std::cerr << "[FixTask] Command admission outcome: " << admissionStatusName(decision.status) << std::endl;
+            return;
+        }
+
+        if (!internalQueues.fixMessageQueue->push(normalized)) {
+            const bool abandoned = commandAdmissionIndex.abandonReservation(normalized);
+            std::cerr << "[FixTask] Normalized command queue is full; reservation "
+                      << (abandoned ? "abandoned" : "could not be abandoned") << std::endl;
+        }
 
     } catch (const FIX::FieldNotFound &e) {
         std::cerr << "[FixTask] Required field missing: " << e.field << std::endl;
