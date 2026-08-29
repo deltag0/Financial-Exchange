@@ -85,6 +85,14 @@ private:
     std::uint8_t size_;
 };
 
+struct CommandResultCorrelation final {
+    ClientId clientId;
+    ClientCommandId clientCommandId;
+    CommandSequence commandSequence;
+
+    bool operator==(const CommandResultCorrelation&) const = default;
+};
+
 static_assert(std::is_trivially_copyable_v<CommandSequence>);
 static_assert(std::is_trivially_copyable_v<TargetOrderId>);
 static_assert(std::is_trivially_copyable_v<ClientCommandId>);

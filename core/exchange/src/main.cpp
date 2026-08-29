@@ -1,3 +1,4 @@
+#include <admission_completion_consumer.hpp>
 #include <fix_task.hpp>
 #include <matching_engine.hpp>
 #include <shared_queue.hpp>
@@ -53,6 +54,8 @@ int main() {
         exchange::core::Bus multicastBus(BUS_SIZE);
         exchange::core::admission::CommandAdmissionIndex commandAdmissionIndex(COMMAND_ADMISSION_CAPACITY);
         exchange::matching_engine::BoundedCommandResultQueue commandResultQueue(COMMAND_RESULT_QUEUE_SIZE);
+        exchange::core::admission::AdmissionCompletionConsumer admissionCompletionConsumer(commandResultQueue,
+                                                                                           commandAdmissionIndex);
 
         // Initialize FIX Application with all shards
         exchange::core::task::FixTask application(shard_queue_ptrs, multicastBus, clientIdentityResolver,
@@ -66,6 +69,8 @@ int main() {
         std::thread fix_task_thread([&application]() { application.run(); });
 
         std::thread matching_engine_thread([&matching_engine]() { matching_engine.run(); });
+        std::thread admission_completion_thread(
+            [&admissionCompletionConsumer]() { admissionCompletionConsumer.run(); });
 
         // Start 4 Sequencer threads
         std::vector<std::unique_ptr<exchange::sequencer::Sequencer>> sequencers;
@@ -76,7 +81,7 @@ int main() {
             std::vector<exchange::core::SharedQueue<exchange::sequencer::sequenceMessage> *>
                 single_shard = {shard_queue_ptrs[i]};
             sequencers.push_back(std::make_unique<exchange::sequencer::Sequencer>(
-                std::move(single_shard), matching_engine_queue.get()));
+                std::move(single_shard), matching_engine_queue.get(), commandAdmissionIndex));
 
             sequencer_threads.emplace_back([&seq = *sequencers.back()]() { seq.run(); });
             std::cout << "[Main] Launched Sequencer Shard " << i << std::endl;
@@ -104,6 +109,9 @@ int main() {
         }
         if (matching_engine_thread.joinable()) {
             matching_engine_thread.join();
+        }
+        if (admission_completion_thread.joinable()) {
+            admission_completion_thread.join();
         }
 
     } catch (std::exception &e) {

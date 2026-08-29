@@ -20,17 +20,29 @@ enum class ProcessingResult {
 
 class CommandResultBatch final {
 public:
-    CommandResultBatch(const domain::CommandSequence commandSequence, const ProcessingResult result,
+    CommandResultBatch(domain::CommandResultCorrelation correlation, const ProcessingResult result,
                        std::vector<domain::BusinessEvent> events)
-        : commandSequence_(commandSequence), result_(result), events_(std::move(events)) {}
+        : correlation_(std::move(correlation)), result_(result), events_(std::move(events)) {
+        for (const domain::BusinessEvent& event : events_) {
+            const domain::CommandSequence eventSequence =
+                std::visit([](const auto& typedEvent) { return typedEvent.eventId.commandSequence; }, event);
+            if (eventSequence != correlation_.commandSequence) {
+                throw std::invalid_argument("command-result event sequence does not match batch correlation");
+            }
+        }
+    }
 
     CommandResultBatch(const CommandResultBatch&) = default;
     CommandResultBatch(CommandResultBatch&&) noexcept = default;
     CommandResultBatch& operator=(const CommandResultBatch&) = delete;
     CommandResultBatch& operator=(CommandResultBatch&&) = delete;
 
+    [[nodiscard]] const domain::CommandResultCorrelation& correlation() const noexcept {
+        return correlation_;
+    }
+
     [[nodiscard]] domain::CommandSequence commandSequence() const noexcept {
-        return commandSequence_;
+        return correlation_.commandSequence;
     }
 
     [[nodiscard]] ProcessingResult result() const noexcept {
@@ -42,7 +54,7 @@ public:
     }
 
 private:
-    domain::CommandSequence commandSequence_;
+    domain::CommandResultCorrelation correlation_;
     ProcessingResult result_;
     std::vector<domain::BusinessEvent> events_;
 };

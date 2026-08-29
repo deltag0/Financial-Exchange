@@ -64,13 +64,31 @@ struct AdmissionStatistics final {
     bool operator==(const AdmissionStatistics&) const = default;
 };
 
+enum class MarkSequencedStatus : std::uint8_t {
+    SEQUENCED = 1,
+    IDEMPOTENT = 2,
+    INVALID_SEQUENCE = 3,
+    UNKNOWN_RESERVATION = 4,
+    COMMAND_MISMATCH = 5,
+    WRONG_STATE = 6,
+    SEQUENCE_MISMATCH = 7,
+};
+
+enum class CompletionStatus : std::uint8_t {
+    COMPLETED = 1,
+    INVALID_BATCH = 2,
+    UNKNOWN_RESERVATION = 3,
+    WRONG_STATE = 4,
+    CORRELATION_MISMATCH = 5,
+};
+
 class CommandAdmissionIndex final {
 public:
     explicit CommandAdmissionIndex(std::size_t capacity);
 
     [[nodiscard]] AdmissionDecision reserve(const sequencer::sequenceMessage& command);
-    [[nodiscard]] bool completeReservation(const sequencer::sequenceMessage& command,
-                                           matching_engine::ImmutableCommandResultBatch result);
+    [[nodiscard]] MarkSequencedStatus markSequenced(const sequencer::sequenceMessage& command);
+    [[nodiscard]] CompletionStatus complete(matching_engine::ImmutableCommandResultBatch result);
     [[nodiscard]] matching_engine::ImmutableCommandResultBatch completedResult(
         const sequencer::sequenceMessage& command) const;
     [[nodiscard]] bool abandonReservation(const sequencer::sequenceMessage& command);
@@ -85,17 +103,20 @@ private:
     };
 
     enum class RecordState : std::uint8_t {
-        IN_FLIGHT,
+        RESERVED,
+        SEQUENCED,
         COMPLETED,
     };
 
     struct Record final {
         NormalizedBusinessCommand command;
         RecordState state;
+        domain::CommandSequence commandSequence;
         matching_engine::ImmutableCommandResultBatch result;
     };
 
     static AdmissionKey keyFrom(const sequencer::sequenceMessage& command);
+    static AdmissionKey keyFrom(const domain::CommandResultCorrelation& correlation);
     static NormalizedBusinessCommand businessCommandFrom(const sequencer::sequenceMessage& command);
 
     const std::size_t capacity_;

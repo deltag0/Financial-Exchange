@@ -265,6 +265,9 @@ TEST(MatchingEngineEventHandoffTest, DeliversOneCompleteImmutableBatchWithEvents
     matching_engine::ImmutableCommandResultBatch batch;
     ASSERT_TRUE(resultQueue.tryPop(batch));
     ASSERT_NE(batch, nullptr);
+    EXPECT_EQ(batch->correlation().clientId, incoming.clientId);
+    EXPECT_EQ(batch->correlation().clientCommandId, *incoming.clientCommandId);
+    EXPECT_EQ(batch->correlation().commandSequence, incoming.globalSequenceNumber);
     EXPECT_EQ(batch->commandSequence(), domain::CommandSequence{3});
     EXPECT_EQ(batch->result(), matching_engine::ProcessingResult::APPLIED);
 
@@ -286,6 +289,82 @@ TEST(MatchingEngineEventHandoffTest, DeliversOneCompleteImmutableBatchWithEvents
     EXPECT_TRUE(resultQueue.empty());
     EXPECT_FALSE(resultQueue.tryPop(batch));
     EXPECT_TRUE(engine.stateIsConsistent());
+}
+
+TEST(MatchingEngineEventHandoffTest, NewOrderAndCancelBatchesUseExactIncomingCorrelationOnly) {
+    core::SharedQueue<sequencer::sequenceMessage> seq_q(4);
+    core::Bus bus(8);
+    matching_engine::BoundedCommandResultQueue resultQueue(2);
+    TestableMatchingEngine engine(&seq_q, bus, resultQueue);
+
+    sequencer::sequenceMessage order =
+        makeOrder(11, sequencer::orderType::BUY, "LEGACY", 100, 10, core::task::TimeInForce::GTC);
+    order.port = 999;
+    order.topic = 888;
+    order.topicSequenceNumber = 777;
+    order.timestamp = 666;
+    order.order = 555;
+    order.shard_id = 3;
+    ASSERT_TRUE(seq_q.push(order));
+    engine.invokeDrain();
+
+    matching_engine::ImmutableCommandResultBatch orderResult;
+    ASSERT_TRUE(resultQueue.tryPop(orderResult));
+    ASSERT_NE(orderResult, nullptr);
+    EXPECT_EQ(orderResult->correlation().clientId, order.clientId);
+    EXPECT_EQ(orderResult->correlation().clientCommandId, *order.clientCommandId);
+    EXPECT_EQ(orderResult->correlation().commandSequence, order.globalSequenceNumber);
+    for (const domain::BusinessEvent& event : orderResult->events()) {
+        EXPECT_EQ(std::visit([](const auto& typedEvent) { return typedEvent.eventId.commandSequence; }, event),
+                  orderResult->commandSequence());
+    }
+
+    sequencer::sequenceMessage cancel = makeCancel(12, 7012, 999);
+    std::strcpy(cancel.symbol, "OTHER");
+    cancel.port = order.port;
+    cancel.topic = order.topic;
+    cancel.topicSequenceNumber = order.topicSequenceNumber;
+    cancel.timestamp = order.timestamp;
+    cancel.order = order.order;
+    cancel.shard_id = order.shard_id;
+    ASSERT_TRUE(seq_q.push(cancel));
+    engine.invokeDrain();
+
+    matching_engine::ImmutableCommandResultBatch cancelResult;
+    ASSERT_TRUE(resultQueue.tryPop(cancelResult));
+    ASSERT_NE(cancelResult, nullptr);
+    EXPECT_EQ(cancelResult->correlation().clientId, cancel.clientId);
+    EXPECT_EQ(cancelResult->correlation().clientCommandId, *cancel.clientCommandId);
+    EXPECT_EQ(cancelResult->correlation().commandSequence, cancel.globalSequenceNumber);
+    for (const domain::BusinessEvent& event : cancelResult->events()) {
+        EXPECT_EQ(std::visit([](const auto& typedEvent) { return typedEvent.eventId.commandSequence; }, event),
+                  cancelResult->commandSequence());
+    }
+}
+
+TEST(CommandResultBatchTest, RejectsEventSequenceThatDoesNotMatchCorrelation) {
+    std::vector<domain::BusinessEvent> events;
+    events.emplace_back(domain::OrderCancelled{
+        .eventId =
+            {
+                .commandSequence = domain::CommandSequence{2},
+                .eventIndex = domain::EventIndex{0},
+            },
+        .orderId = domain::OrderId{1},
+        .clientId = domain::ClientId{100},
+        .instrumentId = domain::InstrumentId{1},
+        .cancelledQuantity = domain::Quantity{1},
+        .reason = domain::CancelReason::IOC_REMAINDER,
+    });
+
+    EXPECT_THROW(matching_engine::CommandResultBatch(
+                     domain::CommandResultCorrelation{
+                         .clientId = domain::ClientId{100},
+                         .clientCommandId = domain::ClientCommandId{"MISMATCH"},
+                         .commandSequence = domain::CommandSequence{1},
+                     },
+                     matching_engine::ProcessingResult::APPLIED, std::move(events)),
+                 std::invalid_argument);
 }
 
 TEST(MatchingEngineEventHandoffTest, SaturationRetriesPendingBatchBeforeProcessingNextCommandWithoutDuplicates) {

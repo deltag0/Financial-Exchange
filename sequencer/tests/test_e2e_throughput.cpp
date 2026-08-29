@@ -4,6 +4,7 @@
 #include <iostream>
 #include <thread>
 
+#include "../../core/admission/include/admission_completion_consumer.hpp"
 #include "../../bus/include/bus.hpp"
 #include "../../core/fix/include/fix_task.hpp"
 #include "../../core/shared_queue/include/shared_queue.hpp"
@@ -47,6 +48,9 @@ public:
     void invokeDrain() {
         drainQueue(sequencerQueue, "Sequencer");
     }
+    std::size_t activeOrderCount() const {
+        return activeOrders.size();
+    }
 };
 
 FIX::Message makeFixNewOrder(const std::string& clientCommandId, const double price = 100.0) {
@@ -82,14 +86,12 @@ TEST(SequencerCancelNormalizationTest, ValidFixCancelGetsDistinctSequenceAndReac
     const core::fix::ClientIdentityResolver clientIdentityResolver({{session, domain::ClientId{500}}});
     core::admission::CommandAdmissionIndex admissionIndex(16);
     core::task::FixTask fixTask(shardQueues, bus, clientIdentityResolver, admissionIndex);
-    TestableSequencer sequencer(shardQueues, &matchingQueue);
+    TestableSequencer sequencer(shardQueues, &matchingQueue, admissionIndex);
     matching_engine::BoundedCommandResultQueue resultQueue(4);
     TestableMatchingEngine matchingEngine(&matchingQueue, bus, resultQueue);
 
     fixTask.fromApp(makeFixNewOrder("NEW-1"), session);
-    sequencer::sequenceMessage normalizedNew{};
-    ASSERT_TRUE(fixTask.getFixMessageQueue()->pop(normalizedNew));
-    fixTask.sendSequencerMessage(normalizedNew);
+    ASSERT_TRUE(fixTask.processNextNormalizedCommand());
     ASSERT_TRUE(sequencer.processOnce());
 
     sequencer::sequenceMessage sequencedNew{};
@@ -110,11 +112,12 @@ TEST(SequencerCancelNormalizationTest, ValidFixCancelGetsDistinctSequenceAndReac
 
     fixTask.fromApp(makeFixCancel("CANCEL-2", "1"), session);
     sequencer::sequenceMessage normalizedCancel{};
-    ASSERT_TRUE(fixTask.getFixMessageQueue()->pop(normalizedCancel));
+    ASSERT_TRUE(fixTask.processNextNormalizedCommand());
+    ASSERT_TRUE(shardQueue.pop(normalizedCancel));
     EXPECT_EQ(normalizedCancel.globalSequenceNumber, domain::CommandSequence{});
     EXPECT_EQ(normalizedCancel.orderId, domain::OrderId{});
     EXPECT_EQ(normalizedCancel.targetOrderId, std::optional<domain::TargetOrderId>{domain::TargetOrderId{1}});
-    fixTask.sendSequencerMessage(normalizedCancel);
+    ASSERT_TRUE(shardQueue.push(normalizedCancel));
     ASSERT_TRUE(sequencer.processOnce());
 
     sequencer::sequenceMessage sequencedCancel{};
@@ -153,7 +156,7 @@ TEST(SequencerClientIdentityTest, OwnershipUsesConfiguredClientIdDespiteChangedA
     });
     core::admission::CommandAdmissionIndex admissionIndex(16);
     core::task::FixTask fixTask(shardQueues, bus, clientIdentityResolver, admissionIndex);
-    TestableSequencer sequencer(shardQueues, &matchingQueue);
+    TestableSequencer sequencer(shardQueues, &matchingQueue, admissionIndex);
     matching_engine::BoundedCommandResultQueue resultQueue(8);
     TestableMatchingEngine matchingEngine(&matchingQueue, bus, resultQueue);
 
@@ -162,11 +165,13 @@ TEST(SequencerClientIdentityTest, OwnershipUsesConfiguredClientIdDespiteChangedA
             const std::uint64_t forcedLegacyPort) -> std::optional<sequencer::sequenceMessage> {
         fixTask.fromApp(message, session);
         sequencer::sequenceMessage normalized{};
-        if (!fixTask.getFixMessageQueue()->pop(normalized)) {
+        if (!fixTask.processNextNormalizedCommand() || !shardQueue.pop(normalized)) {
             return std::nullopt;
         }
         normalized.port = forcedLegacyPort;
-        fixTask.sendSequencerMessage(normalized);
+        if (!shardQueue.push(normalized)) {
+            return std::nullopt;
+        }
         if (!sequencer.processOnce()) {
             return std::nullopt;
         }
@@ -245,16 +250,11 @@ TEST(SequencerCommandAdmissionTest, DuplicateConflictAndCapacityNeverEnterSequen
     const core::fix::ClientIdentityResolver clientIdentityResolver({{session, domain::ClientId{9001}}});
     core::admission::CommandAdmissionIndex admissionIndex(2);
     core::task::FixTask fixTask(shardQueues, bus, clientIdentityResolver, admissionIndex);
-    TestableSequencer sequencer(shardQueues, &matchingQueue);
+    TestableSequencer sequencer(shardQueues, &matchingQueue, admissionIndex);
 
     const auto submitAndSequence = [&](const FIX::Message& message) -> std::optional<sequencer::sequenceMessage> {
         fixTask.fromApp(message, session);
-        sequencer::sequenceMessage normalized{};
-        if (!fixTask.getFixMessageQueue()->pop(normalized)) {
-            return std::nullopt;
-        }
-        fixTask.sendSequencerMessage(normalized);
-        if (!sequencer.processOnce()) {
+        if (!fixTask.processNextNormalizedCommand() || !sequencer.processOnce()) {
             return std::nullopt;
         }
         sequencer::sequenceMessage sequenced{};
@@ -298,6 +298,133 @@ TEST(SequencerCommandAdmissionTest, DuplicateConflictAndCapacityNeverEnterSequen
     EXPECT_EQ(admissionIndex.size(), 2u);
 }
 
+TEST(SequencerHandoffTest, FullMatchingQueueRetainsSequencedCommandWithoutOvertakingOrResequencing) {
+    core::SharedQueue<sequencer::sequenceMessage> shardQueue(4);
+    core::SharedQueue<sequencer::sequenceMessage> matchingQueue(1);
+    std::vector<core::SharedQueue<sequencer::sequenceMessage>*> shardQueues{&shardQueue};
+    core::Bus bus(8);
+    const FIX::SessionID session("FIX.4.4", "EXCHANGE", "SEQUENCER-SATURATION");
+    const core::fix::ClientIdentityResolver resolver({{session, domain::ClientId{9100}}});
+    core::admission::CommandAdmissionIndex admissionIndex(4);
+    core::task::FixTask fixTask(shardQueues, bus, resolver, admissionIndex);
+    TestableSequencer sequencer(shardQueues, &matchingQueue, admissionIndex);
+
+    sequencer::sequenceMessage blocker{};
+    blocker.id = 999;
+    ASSERT_TRUE(matchingQueue.push(blocker));
+    fixTask.fromApp(makeFixNewOrder("FIRST"), session);
+    fixTask.fromApp(makeFixNewOrder("SECOND"), session);
+    ASSERT_TRUE(fixTask.processNextNormalizedCommand());
+    ASSERT_TRUE(fixTask.processNextNormalizedCommand());
+
+    EXPECT_FALSE(sequencer.processOnce());
+    ASSERT_TRUE(sequencer.hasPendingSequencedCommand());
+    ASSERT_TRUE(sequencer.pendingCommand().has_value());
+    EXPECT_EQ(sequencer.pendingCommand()->globalSequenceNumber, domain::CommandSequence{1});
+    EXPECT_FALSE(shardQueue.empty());
+
+    EXPECT_FALSE(sequencer.processOnce());
+    EXPECT_FALSE(sequencer.processOnce());
+    ASSERT_TRUE(sequencer.pendingCommand().has_value());
+    EXPECT_EQ(sequencer.pendingCommand()->globalSequenceNumber, domain::CommandSequence{1});
+    EXPECT_FALSE(shardQueue.empty());
+
+    sequencer::sequenceMessage removedBlocker{};
+    ASSERT_TRUE(matchingQueue.pop(removedBlocker));
+    ASSERT_EQ(removedBlocker.id, 999u);
+    ASSERT_TRUE(sequencer.processOnce());
+    EXPECT_FALSE(sequencer.hasPendingSequencedCommand());
+
+    sequencer::sequenceMessage first{};
+    ASSERT_TRUE(matchingQueue.pop(first));
+    ASSERT_TRUE(first.clientCommandId.has_value());
+    EXPECT_EQ(first.clientCommandId->value(), "FIRST");
+    EXPECT_EQ(first.globalSequenceNumber, domain::CommandSequence{1});
+
+    ASSERT_TRUE(sequencer.processOnce());
+    sequencer::sequenceMessage second{};
+    ASSERT_TRUE(matchingQueue.pop(second));
+    ASSERT_TRUE(second.clientCommandId.has_value());
+    EXPECT_EQ(second.clientCommandId->value(), "SECOND");
+    EXPECT_EQ(second.globalSequenceNumber, domain::CommandSequence{2});
+    EXPECT_FALSE(sequencer.processOnce());
+}
+
+TEST(SequencerAdmissionBindingTest, MissingProductionReservationIsAnInvariantFailure) {
+    core::SharedQueue<sequencer::sequenceMessage> shardQueue(2);
+    core::SharedQueue<sequencer::sequenceMessage> matchingQueue(2);
+    std::vector<core::SharedQueue<sequencer::sequenceMessage>*> shardQueues{&shardQueue};
+    const FIX::SessionID session("FIX.4.4", "EXCHANGE", "UNRESERVED-CLIENT");
+    const core::fix::ClientIdentityResolver resolver({{session, domain::ClientId{9150}}});
+    core::admission::CommandAdmissionIndex admissionIndex(2);
+    TestableSequencer sequencer(shardQueues, &matchingQueue, admissionIndex);
+    const sequencer::sequenceMessage unreserved =
+        core::fix::parseFixMessage(makeFixNewOrder("UNRESERVED"), session, resolver, 1);
+    ASSERT_TRUE(shardQueue.push(unreserved));
+
+    EXPECT_THROW(static_cast<void>(sequencer.processOnce()), std::logic_error);
+    EXPECT_TRUE(matchingQueue.empty());
+    EXPECT_FALSE(sequencer.hasPendingSequencedCommand());
+}
+
+TEST(CommandAdmissionCompletionIntegrationTest, CompletedFixRetransmissionReturnsOriginalWithoutNewWork) {
+    core::SharedQueue<sequencer::sequenceMessage> shardQueue(8);
+    core::SharedQueue<sequencer::sequenceMessage> matchingQueue(8);
+    std::vector<core::SharedQueue<sequencer::sequenceMessage>*> shardQueues{&shardQueue};
+    core::Bus bus(16);
+    const FIX::SessionID session("FIX.4.4", "EXCHANGE", "COMPLETION-CLIENT");
+    const core::fix::ClientIdentityResolver resolver({{session, domain::ClientId{9200}}});
+    core::admission::CommandAdmissionIndex admissionIndex(8);
+    core::task::FixTask fixTask(shardQueues, bus, resolver, admissionIndex);
+    TestableSequencer sequencer(shardQueues, &matchingQueue, admissionIndex);
+    matching_engine::BoundedCommandResultQueue resultQueue(4);
+    TestableMatchingEngine matchingEngine(&matchingQueue, bus, resultQueue);
+    core::admission::AdmissionCompletionConsumer completionConsumer(resultQueue, admissionIndex);
+    const FIX::Message message = makeFixNewOrder("COMPLETE-1");
+
+    fixTask.fromApp(message, session);
+    ASSERT_TRUE(fixTask.processNextNormalizedCommand());
+    sequencer::sequenceMessage normalized{};
+    ASSERT_TRUE(shardQueue.pop(normalized));
+    ASSERT_TRUE(shardQueue.push(normalized));
+    ASSERT_TRUE(sequencer.processOnce());
+    matchingEngine.invokeDrain();
+    ASSERT_EQ(matchingEngine.activeOrderCount(), 1u);
+
+    matching_engine::ImmutableCommandResultBatch original;
+    ASSERT_TRUE(resultQueue.tryPop(original));
+    ASSERT_NE(original, nullptr);
+    ASSERT_TRUE(resultQueue.tryPush(original));
+    ASSERT_TRUE(completionConsumer.processNext());
+    EXPECT_EQ(admissionIndex.completedResult(normalized), original);
+
+    fixTask.fromApp(message, session);
+    EXPECT_TRUE(fixTask.getFixMessageQueue()->empty());
+    EXPECT_FALSE(fixTask.processNextNormalizedCommand());
+    EXPECT_FALSE(sequencer.processOnce());
+    EXPECT_TRUE(matchingQueue.empty());
+    matchingEngine.invokeDrain();
+    EXPECT_EQ(matchingEngine.activeOrderCount(), 1u);
+    EXPECT_TRUE(resultQueue.empty());
+    EXPECT_FALSE(completionConsumer.processNext());
+
+    const core::admission::AdmissionStatistics statistics = admissionIndex.statistics();
+    EXPECT_EQ(statistics.firstSubmissions, 1u);
+    EXPECT_EQ(statistics.identicalCompleted, 1u);
+    EXPECT_EQ(admissionIndex.completedResult(normalized), original);
+    EXPECT_EQ(original->commandSequence(), domain::CommandSequence{1});
+    ASSERT_EQ(original->events().size(), 1u);
+    EXPECT_EQ(std::visit([](const auto& event) { return event.eventId.commandSequence; }, original->events().front()),
+              domain::CommandSequence{1});
+
+    fixTask.fromApp(makeFixNewOrder("COMPLETE-2"), session);
+    ASSERT_TRUE(fixTask.processNextNormalizedCommand());
+    ASSERT_TRUE(sequencer.processOnce());
+    sequencer::sequenceMessage next{};
+    ASSERT_TRUE(matchingQueue.pop(next));
+    EXPECT_EQ(next.globalSequenceNumber, domain::CommandSequence{2});
+}
+
 TEST(E2EThroughputTest, SequencerToMatchingEngineThroughput) {
     // Test: Measure throughput from Sequencer → MatchingEngine (excluding FIX parsing)
     const int num_shards = 4;
@@ -313,7 +440,8 @@ TEST(E2EThroughputTest, SequencerToMatchingEngineThroughput) {
     matching_engine::BoundedCommandResultQueue command_result_queue(queue_size);
 
     // Create pipeline components
-    auto sequencer = std::make_unique<sequencer::Sequencer>(sequencer_queues, &matching_engine_queue);
+    auto sequencer = std::make_unique<sequencer::Sequencer>(sequencer_queues, &matching_engine_queue,
+                                                            sequencer::Sequencer::INTERNAL_ADMISSION_BYPASS);
     auto matching_engine =
         std::make_unique<matching_engine::MatchingEngine>(&matching_engine_queue, multicast_bus, command_result_queue);
 
@@ -450,7 +578,8 @@ TEST(E2EThroughputTest, FullPipelineWithFixParsing) {
     auto fix_queue = fix_task.getFixMessageQueue();
 
     // Create sequencer and matching engine
-    auto sequencer = std::make_unique<sequencer::Sequencer>(sequencer_queues, &matching_engine_queue);
+    auto sequencer = std::make_unique<sequencer::Sequencer>(sequencer_queues, &matching_engine_queue,
+                                                            sequencer::Sequencer::INTERNAL_ADMISSION_BYPASS);
     auto matching_engine =
         std::make_unique<matching_engine::MatchingEngine>(&matching_engine_queue, multicast_bus, command_result_queue);
 

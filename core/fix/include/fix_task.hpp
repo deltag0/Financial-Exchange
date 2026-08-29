@@ -9,6 +9,7 @@
 // Pre-include STL headers so the throw(...) macro hack doesn't break them
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #if __cplusplus >= 201703L
@@ -55,6 +56,11 @@ public:
         return internalQueues.fixMessageQueue.get();
     }
 
+    [[nodiscard]] bool processNextNormalizedCommand();
+    [[nodiscard]] bool hasPendingNormalizedCommand() const noexcept {
+        return pendingNormalizedCommand.has_value();
+    }
+
     void onCreate(const FIX::SessionID &sessionID) override;
     void onLogon(const FIX::SessionID &sessionID) override;
     void onLogout(const FIX::SessionID &sessionID) override;
@@ -64,11 +70,12 @@ public:
     void fromApp(const FIX::Message &message, const FIX::SessionID &sessionID) noexcept override;
 
     void sendFixMessage(FIX::Message &message, const FIX::SessionID &sessionID);
-    void sendSequencerMessage(sequencer::sequenceMessage &message);
     void run() override;
     void send(sequencer::sequenceMessage &message) override;
 
 private:
+    [[nodiscard]] bool trySendSequencerMessage(const sequencer::sequenceMessage &message);
+
     // Internal Queues to process bursts of messages from FIX sessions and internal business
     // messages
     InternalQueues internalQueues;
@@ -76,6 +83,7 @@ private:
     // The exchange composition root owns both shared services and outlives FixTask.
     const fix::ClientIdentityResolver &clientIdentityResolver;
     admission::CommandAdmissionIndex &commandAdmissionIndex;
+    std::optional<sequencer::sequenceMessage> pendingNormalizedCommand;
     std::atomic<Bus::cursor_type> cursor{0};
 };
 

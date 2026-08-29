@@ -2,7 +2,34 @@
 #include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <stdexcept>
+#include <string>
 #include <thread>
+
+namespace {
+
+const char* markSequencedStatusName(const exchange::core::admission::MarkSequencedStatus status) {
+    using exchange::core::admission::MarkSequencedStatus;
+    switch (status) {
+        case MarkSequencedStatus::SEQUENCED:
+            return "Sequenced";
+        case MarkSequencedStatus::IDEMPOTENT:
+            return "Idempotent";
+        case MarkSequencedStatus::INVALID_SEQUENCE:
+            return "InvalidSequence";
+        case MarkSequencedStatus::UNKNOWN_RESERVATION:
+            return "UnknownReservation";
+        case MarkSequencedStatus::COMMAND_MISMATCH:
+            return "CommandMismatch";
+        case MarkSequencedStatus::WRONG_STATE:
+            return "WrongState";
+        case MarkSequencedStatus::SEQUENCE_MISMATCH:
+            return "SequenceMismatch";
+    }
+    return "UnknownMarkSequencedStatus";
+}
+
+} // namespace
 
 void exchange::sequencer::Sequencer::run() {
     std::cout << "[Sequencer] Thread started" << std::endl;
@@ -13,6 +40,10 @@ void exchange::sequencer::Sequencer::run() {
 }
 
 bool exchange::sequencer::Sequencer::processNext() {
+    if (pendingSequencedCommand.has_value()) {
+        return handoffPendingCommand();
+    }
+
     // A Sequencer instance currently owns one shard queue.
     if (mq_shards.empty() || mq_shards[0]->empty()) {
         return false;
@@ -32,9 +63,29 @@ bool exchange::sequencer::Sequencer::processNext() {
     }
     message.topicSequenceNumber = getNextTopicSequenceNumber(message);
 
-    if (matchingEngineQueue && !matchingEngineQueue->push(message)) {
-        std::cerr << "[Sequencer] Failed to forward message ID: " << message.id << " to matching engine" << std::endl;
+    if (admissionIndex != nullptr) {
+        const core::admission::MarkSequencedStatus status = admissionIndex->markSequenced(message);
+        if (status != core::admission::MarkSequencedStatus::SEQUENCED) {
+            throw std::logic_error("sequencer admission binding failed: " +
+                                   std::string{markSequencedStatusName(status)});
+        }
     }
+
+    pendingSequencedCommand = message;
+    return handoffPendingCommand();
+}
+
+bool exchange::sequencer::Sequencer::handoffPendingCommand() {
+    if (!pendingSequencedCommand.has_value()) {
+        return true;
+    }
+    if (matchingEngineQueue == nullptr) {
+        throw std::logic_error("sequencer has no matching-engine queue");
+    }
+    if (!matchingEngineQueue->push(*pendingSequencedCommand)) {
+        return false;
+    }
+    pendingSequencedCommand.reset();
     return true;
 }
 
