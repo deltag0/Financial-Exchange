@@ -24,6 +24,7 @@ endif()
 # --- Core Setup ---
 # core is a library that includes header-only components and FIX implementations
 add_library(core_lib
+    core/admission/src/admission_completion_consumer.cpp
     core/admission/src/command_admission.cpp
     core/fix/src/client_identity.cpp
     core/fix/src/fix_task.cpp

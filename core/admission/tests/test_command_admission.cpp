@@ -44,19 +44,30 @@ sequencer::sequenceMessage makeCancel(const std::uint64_t clientId = 100,
     return command;
 }
 
-matching_engine::ImmutableCommandResultBatch makeCompletedResult() {
+matching_engine::ImmutableCommandResultBatch makeCompletedResult(const std::uint64_t clientId = 100,
+                                                                 const std::string& clientCommandId = "NEW-1",
+                                                                 const std::uint64_t commandSequence = 77) {
     std::vector<domain::BusinessEvent> events;
     events.emplace_back(domain::OrderRested{
-        .eventId = {.commandSequence = domain::CommandSequence{77}, .eventIndex = domain::EventIndex{0}},
-        .orderId = domain::OrderId{77},
-        .clientId = domain::ClientId{100},
+        .eventId =
+            {
+                .commandSequence = domain::CommandSequence{commandSequence},
+                .eventIndex = domain::EventIndex{0},
+            },
+        .orderId = domain::OrderId{commandSequence},
+        .clientId = domain::ClientId{clientId},
         .instrumentId = domain::InstrumentId{1},
         .side = domain::Side::BUY,
         .price = domain::Price{100},
         .remainingQuantity = domain::Quantity{10},
     });
     return std::make_shared<const matching_engine::CommandResultBatch>(
-        domain::CommandSequence{77}, matching_engine::ProcessingResult::APPLIED, std::move(events));
+        domain::CommandResultCorrelation{
+            .clientId = domain::ClientId{clientId},
+            .clientCommandId = domain::ClientCommandId{clientCommandId},
+            .commandSequence = domain::CommandSequence{commandSequence},
+        },
+        matching_engine::ProcessingResult::APPLIED, std::move(events));
 }
 
 void expectConflict(const AdmissionDecision& decision) {
@@ -92,10 +103,12 @@ TEST(CommandAdmissionIndexTest, IdenticalCancelRetransmissionIsInFlight) {
 
 TEST(CommandAdmissionIndexTest, CompletedRetransmissionReturnsExactOriginalImmutableBatchAndEventIds) {
     CommandAdmissionIndex index(8);
-    const sequencer::sequenceMessage command = makeNewOrder();
+    sequencer::sequenceMessage command = makeNewOrder();
+    command.globalSequenceNumber = domain::CommandSequence{77};
     const matching_engine::ImmutableCommandResultBatch original = makeCompletedResult();
     ASSERT_EQ(index.reserve(command).status, AdmissionStatus::FIRST_SUBMISSION);
-    ASSERT_TRUE(index.completeReservation(command, original));
+    ASSERT_EQ(index.markSequenced(command), MarkSequencedStatus::SEQUENCED);
+    ASSERT_EQ(index.complete(original), CompletionStatus::COMPLETED);
 
     sequencer::sequenceMessage retransmission = command;
     retransmission.timestamp = 999;
@@ -214,12 +227,95 @@ TEST(CommandAdmissionIndexTest, AbandonBeforeCommitAllowsRetry) {
     EXPECT_EQ(index.size(), 1u);
 }
 
+TEST(CommandAdmissionLifecycleTest, ValidReservedSequencedCompletedTransitionAndIdempotentBinding) {
+    CommandAdmissionIndex index(4);
+    sequencer::sequenceMessage command = makeNewOrder();
+    ASSERT_EQ(index.reserve(command).status, AdmissionStatus::FIRST_SUBMISSION);
+
+    command.globalSequenceNumber = domain::CommandSequence{77};
+    EXPECT_EQ(index.markSequenced(command), MarkSequencedStatus::SEQUENCED);
+    EXPECT_EQ(index.markSequenced(command), MarkSequencedStatus::IDEMPOTENT);
+
+    const matching_engine::ImmutableCommandResultBatch result = makeCompletedResult();
+    EXPECT_EQ(index.complete(result), CompletionStatus::COMPLETED);
+    EXPECT_EQ(index.completedResult(command), result);
+}
+
+TEST(CommandAdmissionLifecycleTest, SequencingRejectsZeroUnknownMismatchAndDifferentRebinding) {
+    CommandAdmissionIndex index(4);
+    sequencer::sequenceMessage original = makeNewOrder();
+    ASSERT_EQ(index.reserve(original).status, AdmissionStatus::FIRST_SUBMISSION);
+
+    EXPECT_EQ(index.markSequenced(original), MarkSequencedStatus::INVALID_SEQUENCE);
+
+    sequencer::sequenceMessage unknown = makeNewOrder(100, "UNKNOWN");
+    unknown.globalSequenceNumber = domain::CommandSequence{1};
+    EXPECT_EQ(index.markSequenced(unknown), MarkSequencedStatus::UNKNOWN_RESERVATION);
+
+    sequencer::sequenceMessage mismatch = original;
+    mismatch.price = domain::Price{101};
+    mismatch.globalSequenceNumber = domain::CommandSequence{1};
+    EXPECT_EQ(index.markSequenced(mismatch), MarkSequencedStatus::COMMAND_MISMATCH);
+
+    original.globalSequenceNumber = domain::CommandSequence{1};
+    ASSERT_EQ(index.markSequenced(original), MarkSequencedStatus::SEQUENCED);
+    original.globalSequenceNumber = domain::CommandSequence{2};
+    EXPECT_EQ(index.markSequenced(original), MarkSequencedStatus::SEQUENCE_MISMATCH);
+}
+
+TEST(CommandAdmissionLifecycleTest, AbandonOnlyRemovesReservedRecords) {
+    CommandAdmissionIndex index(4);
+    sequencer::sequenceMessage command = makeNewOrder();
+    ASSERT_EQ(index.reserve(command).status, AdmissionStatus::FIRST_SUBMISSION);
+    ASSERT_TRUE(index.abandonReservation(command));
+    ASSERT_EQ(index.size(), 0u);
+
+    ASSERT_EQ(index.reserve(command).status, AdmissionStatus::FIRST_SUBMISSION);
+    command.globalSequenceNumber = domain::CommandSequence{77};
+    ASSERT_EQ(index.markSequenced(command), MarkSequencedStatus::SEQUENCED);
+    EXPECT_FALSE(index.abandonReservation(command));
+    EXPECT_EQ(index.reserve(command).status, AdmissionStatus::IDENTICAL_IN_FLIGHT);
+
+    const matching_engine::ImmutableCommandResultBatch result = makeCompletedResult();
+    ASSERT_EQ(index.complete(result), CompletionStatus::COMPLETED);
+    EXPECT_FALSE(index.abandonReservation(command));
+    const AdmissionDecision retransmission = index.reserve(command);
+    EXPECT_EQ(retransmission.status, AdmissionStatus::IDENTICAL_COMPLETED);
+    EXPECT_EQ(retransmission.originalResult, result);
+}
+
+TEST(CommandAdmissionLifecycleTest, CompletionRejectsInvalidUnknownWrongStateAndMismatchedCorrelation) {
+    CommandAdmissionIndex index(8);
+    sequencer::sequenceMessage command = makeNewOrder();
+    ASSERT_EQ(index.reserve(command).status, AdmissionStatus::FIRST_SUBMISSION);
+
+    EXPECT_EQ(index.complete({}), CompletionStatus::INVALID_BATCH);
+    EXPECT_EQ(index.complete(makeCompletedResult(0, "NEW-1", 77)), CompletionStatus::INVALID_BATCH);
+    EXPECT_EQ(index.complete(makeCompletedResult(100, "NEW-1", 0)), CompletionStatus::INVALID_BATCH);
+    EXPECT_EQ(index.complete(makeCompletedResult()), CompletionStatus::WRONG_STATE);
+    EXPECT_EQ(index.complete(makeCompletedResult(999, "NEW-1", 77)), CompletionStatus::UNKNOWN_RESERVATION);
+    EXPECT_EQ(index.complete(makeCompletedResult(100, "OTHER", 77)), CompletionStatus::UNKNOWN_RESERVATION);
+
+    command.globalSequenceNumber = domain::CommandSequence{77};
+    ASSERT_EQ(index.markSequenced(command), MarkSequencedStatus::SEQUENCED);
+    EXPECT_EQ(index.complete(makeCompletedResult(100, "NEW-1", 78)), CompletionStatus::CORRELATION_MISMATCH);
+
+    const matching_engine::ImmutableCommandResultBatch original = makeCompletedResult();
+    ASSERT_EQ(index.complete(original), CompletionStatus::COMPLETED);
+    const matching_engine::ImmutableCommandResultBatch replacement = makeCompletedResult(100, "NEW-1", 77);
+    EXPECT_EQ(index.complete(replacement), CompletionStatus::WRONG_STATE);
+    EXPECT_EQ(index.completedResult(command), original);
+    EXPECT_NE(index.completedResult(command), replacement);
+}
+
 TEST(CommandAdmissionIndexTest, CapacityFailsClosedWithoutEvictingCompletedRecordOrCreatingBusinessResult) {
     CommandAdmissionIndex index(1);
-    const sequencer::sequenceMessage retained = makeNewOrder(100, "RETAINED");
-    const matching_engine::ImmutableCommandResultBatch original = makeCompletedResult();
+    sequencer::sequenceMessage retained = makeNewOrder(100, "RETAINED");
+    retained.globalSequenceNumber = domain::CommandSequence{77};
+    const matching_engine::ImmutableCommandResultBatch original = makeCompletedResult(100, "RETAINED", 77);
     ASSERT_EQ(index.reserve(retained).status, AdmissionStatus::FIRST_SUBMISSION);
-    ASSERT_TRUE(index.completeReservation(retained, original));
+    ASSERT_EQ(index.markSequenced(retained), MarkSequencedStatus::SEQUENCED);
+    ASSERT_EQ(index.complete(original), CompletionStatus::COMPLETED);
 
     const AdmissionDecision unavailable = index.reserve(makeNewOrder(200, "NEW"));
 

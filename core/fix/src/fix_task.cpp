@@ -81,21 +81,34 @@ void FixTask::sendFixMessage(FIX::Message &message, const FIX::SessionID &sessio
     FIX::Session::sendToTarget(message, sessionID);
 }
 
-void FixTask::sendSequencerMessage(sequencer::sequenceMessage &message) {
-    if (!mq_shards[message.shard_id]->push(message)) {
-        std::cerr << "[FixTask] Failed to send message to sequencer shard " << (int)message.shard_id
-                  << std::endl;
+bool FixTask::trySendSequencerMessage(const sequencer::sequenceMessage &message) {
+    return mq_shards[message.shard_id]->push(message);
+}
+
+bool FixTask::processNextNormalizedCommand() {
+    if (!pendingNormalizedCommand.has_value()) {
+        sequencer::sequenceMessage message{};
+        if (!internalQueues.fixMessageQueue->pop(message)) {
+            return false;
+        }
+        pendingNormalizedCommand = message;
     }
+
+    if (!trySendSequencerMessage(*pendingNormalizedCommand)) {
+        return false;
+    }
+    pendingNormalizedCommand.reset();
+    return true;
 }
 
 void FixTask::send(sequencer::sequenceMessage &) {}
 
 void FixTask::run() {
     while (true) {
-        for (int i = 0; i < EXT_BURST_MESSAGES && !internalQueues.fixMessageQueue->empty(); ++i) {
-            sequencer::sequenceMessage msg;
-            internalQueues.fixMessageQueue->pop(msg);
-            sendSequencerMessage(msg);
+        for (int i = 0; i < EXT_BURST_MESSAGES; ++i) {
+            if (!processNextNormalizedCommand()) {
+                break;
+            }
         }
 
         for (int i = 0; i < INT_BURST_MESSAGES; ++i) {

@@ -1,5 +1,7 @@
 #include "command_admission.hpp"
 
+#include "../../../matching_engine/include/command_result_queue.hpp"
+
 #include <stdexcept>
 #include <utility>
 
@@ -39,7 +41,7 @@ AdmissionDecision CommandAdmissionIndex::reserve(const sequencer::sequenceMessag
                 .originalResult = {},
             };
         }
-        if (existing->second.state == RecordState::IN_FLIGHT) {
+        if (existing->second.state != RecordState::COMPLETED) {
             ++statistics_.identicalInFlight;
             return AdmissionDecision{
                 .status = AdmissionStatus::IDENTICAL_IN_FLIGHT,
@@ -67,7 +69,8 @@ AdmissionDecision CommandAdmissionIndex::reserve(const sequencer::sequenceMessag
 
     records_.emplace(key, Record{
                               .command = businessCommand,
-                              .state = RecordState::IN_FLIGHT,
+                              .state = RecordState::RESERVED,
+                              .commandSequence = {},
                               .result = {},
                           });
     ++statistics_.firstSubmissions;
@@ -78,23 +81,60 @@ AdmissionDecision CommandAdmissionIndex::reserve(const sequencer::sequenceMessag
     };
 }
 
-bool CommandAdmissionIndex::completeReservation(const sequencer::sequenceMessage& command,
-                                                matching_engine::ImmutableCommandResultBatch result) {
-    if (result == nullptr) {
-        throw std::invalid_argument("command admission cannot complete with an empty result batch");
+MarkSequencedStatus CommandAdmissionIndex::markSequenced(const sequencer::sequenceMessage& command) {
+    if (command.globalSequenceNumber.value() == 0) {
+        return MarkSequencedStatus::INVALID_SEQUENCE;
     }
     const AdmissionKey key = keyFrom(command);
     const NormalizedBusinessCommand businessCommand = businessCommandFrom(command);
 
     std::lock_guard lock(mutex_);
     const auto existing = records_.find(key);
-    if (existing == records_.end() || existing->second.state != RecordState::IN_FLIGHT ||
-        existing->second.command != businessCommand) {
-        return false;
+    if (existing == records_.end()) {
+        return MarkSequencedStatus::UNKNOWN_RESERVATION;
+    }
+    if (existing->second.command != businessCommand) {
+        return MarkSequencedStatus::COMMAND_MISMATCH;
+    }
+    if (existing->second.state == RecordState::RESERVED) {
+        existing->second.state = RecordState::SEQUENCED;
+        existing->second.commandSequence = command.globalSequenceNumber;
+        return MarkSequencedStatus::SEQUENCED;
+    }
+    if (existing->second.state == RecordState::SEQUENCED) {
+        if (existing->second.commandSequence != command.globalSequenceNumber) {
+            return MarkSequencedStatus::SEQUENCE_MISMATCH;
+        }
+        return MarkSequencedStatus::IDEMPOTENT;
+    }
+    return MarkSequencedStatus::WRONG_STATE;
+}
+
+CompletionStatus CommandAdmissionIndex::complete(matching_engine::ImmutableCommandResultBatch result) {
+    if (result == nullptr) {
+        return CompletionStatus::INVALID_BATCH;
+    }
+    const domain::CommandResultCorrelation& correlation = result->correlation();
+    if (correlation.clientId.value() == 0 || correlation.commandSequence.value() == 0 ||
+        correlation.clientCommandId.value().empty() || result->commandSequence() != correlation.commandSequence) {
+        return CompletionStatus::INVALID_BATCH;
+    }
+    const AdmissionKey key = keyFrom(correlation);
+
+    std::lock_guard lock(mutex_);
+    const auto existing = records_.find(key);
+    if (existing == records_.end()) {
+        return CompletionStatus::UNKNOWN_RESERVATION;
+    }
+    if (existing->second.state != RecordState::SEQUENCED) {
+        return CompletionStatus::WRONG_STATE;
+    }
+    if (existing->second.commandSequence != correlation.commandSequence) {
+        return CompletionStatus::CORRELATION_MISMATCH;
     }
     existing->second.state = RecordState::COMPLETED;
     existing->second.result = std::move(result);
-    return true;
+    return CompletionStatus::COMPLETED;
 }
 
 matching_engine::ImmutableCommandResultBatch CommandAdmissionIndex::completedResult(
@@ -117,7 +157,7 @@ bool CommandAdmissionIndex::abandonReservation(const sequencer::sequenceMessage&
 
     std::lock_guard lock(mutex_);
     const auto existing = records_.find(key);
-    if (existing == records_.end() || existing->second.state != RecordState::IN_FLIGHT ||
+    if (existing == records_.end() || existing->second.state != RecordState::RESERVED ||
         existing->second.command != businessCommand) {
         return false;
     }
@@ -154,6 +194,13 @@ AdmissionKey CommandAdmissionIndex::keyFrom(const sequencer::sequenceMessage& co
     return AdmissionKey{
         .clientId = command.clientId,
         .clientCommandId = *command.clientCommandId,
+    };
+}
+
+AdmissionKey CommandAdmissionIndex::keyFrom(const domain::CommandResultCorrelation& correlation) {
+    return AdmissionKey{
+        .clientId = correlation.clientId,
+        .clientCommandId = correlation.clientCommandId,
     };
 }
 

@@ -42,6 +42,18 @@ domain::Side toDomainSide(const sequencer::orderType side) {
     throw std::logic_error("non-order side reached matching engine");
 }
 
+domain::CommandResultCorrelation resultCorrelationFrom(const sequencer::sequenceMessage& message) {
+    if (message.clientId.value() == 0 || !message.clientCommandId.has_value() ||
+        message.globalSequenceNumber.value() == 0) {
+        throw std::logic_error("sequenced command is missing result correlation");
+    }
+    return domain::CommandResultCorrelation{
+        .clientId = message.clientId,
+        .clientCommandId = *message.clientCommandId,
+        .commandSequence = message.globalSequenceNumber,
+    };
+}
+
 } // namespace
 
 MatchingEngine::MatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus,
@@ -84,9 +96,10 @@ void MatchingEngine::drainQueue(core::SharedQueue<sequencer::sequenceMessage>& q
             return;
         }
 
+        const domain::CommandResultCorrelation correlation = resultCorrelationFrom(message);
         ProcessingOutcome outcome = processMessage(message);
-        ImmutableCommandResultBatch batch = std::make_shared<const CommandResultBatch>(
-            message.globalSequenceNumber, outcome.result, std::move(outcome.events));
+        ImmutableCommandResultBatch batch =
+            std::make_shared<const CommandResultBatch>(correlation, outcome.result, std::move(outcome.events));
 
         send(message);
         if (!commandResultQueue.tryPush(batch)) {
