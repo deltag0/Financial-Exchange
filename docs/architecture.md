@@ -216,6 +216,16 @@ the next candidate sequence for the journal, but that sequence becomes authorita
 complete command record is confirmed durable. A failed or uncertain append halts admission and
 requires journal recovery before another sequence is selected.
 
+Before the journal stage exists, one bounded composition-root-owned in-process queue may model the
+sequencing ingress. Gateway session threads first publish admitted normalized commands to a bounded
+gateway-owned MPSC staging queue. One gateway worker drains that staging FIFO and owns at most one
+pending handoff while the sequencing ingress is full; it retries the pending command before taking
+later staged work. Successful sequencing-ingress enqueue order defines only the current process-local
+FIFO order, and exactly one sequencer consumes that queue and owns its checked sequence counter. This
+stage is not durable and does not make its sequence values authoritative across restart.
+`InstrumentId` and any non-authoritative partition metadata pass through unchanged; instrument
+routing belongs after the future journal boundary.
+
 ### Journal
 
 #### Purpose

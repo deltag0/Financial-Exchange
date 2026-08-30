@@ -60,11 +60,11 @@ FIX::Message makeCancel(const std::string& clientCommandId, const std::string& t
 TEST(FixClientIdentityTest, IsStableAcrossRepeatedParsingReconnectAndAlternateSessions) {
     const FIX::SessionID simulatedReconnect("FIX.4.2", "EXCHANGE", "CLIENT-A");
 
-    const auto first = parseFixMessage(makeNewOrder("PRIMARY-1"), PRIMARY_SESSION, identityResolver(), 1);
-    const auto repeated = parseFixMessage(makeNewOrder("PRIMARY-2"), PRIMARY_SESSION, identityResolver(), 1);
-    const auto reconnected = parseFixMessage(makeNewOrder("RECONNECTED"), simulatedReconnect, identityResolver(), 1);
-    const auto alternate = parseFixMessage(makeNewOrder("ALTERNATE"), ALTERNATE_SESSION, identityResolver(), 1);
-    const auto other = parseFixMessage(makeNewOrder("OTHER"), OTHER_CLIENT_SESSION, identityResolver(), 1);
+    const auto first = parseFixMessage(makeNewOrder("PRIMARY-1"), PRIMARY_SESSION, identityResolver());
+    const auto repeated = parseFixMessage(makeNewOrder("PRIMARY-2"), PRIMARY_SESSION, identityResolver());
+    const auto reconnected = parseFixMessage(makeNewOrder("RECONNECTED"), simulatedReconnect, identityResolver());
+    const auto alternate = parseFixMessage(makeNewOrder("ALTERNATE"), ALTERNATE_SESSION, identityResolver());
+    const auto other = parseFixMessage(makeNewOrder("OTHER"), OTHER_CLIENT_SESSION, identityResolver());
 
     EXPECT_EQ(first.clientId, domain::ClientId{7001});
     EXPECT_EQ(repeated.clientId, first.clientId);
@@ -75,8 +75,8 @@ TEST(FixClientIdentityTest, IsStableAcrossRepeatedParsingReconnectAndAlternateSe
 }
 
 TEST(FixClientIdentityTest, NewOrderAndCancelUseConfiguredIdentity) {
-    const auto newOrder = parseFixMessage(makeNewOrder("NEW"), PRIMARY_SESSION, identityResolver(), 1);
-    const auto cancel = parseFixMessage(makeCancel("CANCEL", "99"), ALTERNATE_SESSION, identityResolver(), 1);
+    const auto newOrder = parseFixMessage(makeNewOrder("NEW"), PRIMARY_SESSION, identityResolver());
+    const auto cancel = parseFixMessage(makeCancel("CANCEL", "99"), ALTERNATE_SESSION, identityResolver());
 
     EXPECT_EQ(newOrder.clientId, domain::ClientId{7001});
     EXPECT_EQ(cancel.clientId, domain::ClientId{7001});
@@ -84,29 +84,28 @@ TEST(FixClientIdentityTest, NewOrderAndCancelUseConfiguredIdentity) {
 }
 
 TEST(FixClientIdentityTest, UnknownExactIdentityIsRejectedWithoutConsumingParserOrder) {
-    const auto before = parseFixMessage(makeNewOrder("BEFORE"), PRIMARY_SESSION, identityResolver(), 1);
+    const auto before = parseFixMessage(makeNewOrder("BEFORE"), PRIMARY_SESSION, identityResolver());
 
-    EXPECT_THROW(parseFixMessage(makeNewOrder("UNKNOWN"), UNKNOWN_SESSION, identityResolver(), 1), FixValidationError);
+    EXPECT_THROW(parseFixMessage(makeNewOrder("UNKNOWN"), UNKNOWN_SESSION, identityResolver()), FixValidationError);
     const FIX::SessionID unconfiguredQualifier("FIX.4.2", "EXCHANGE", "CLIENT-A", "QUALIFIER");
-    EXPECT_THROW(parseFixMessage(makeNewOrder("QUALIFIED"), unconfiguredQualifier, identityResolver(), 1),
+    EXPECT_THROW(parseFixMessage(makeNewOrder("QUALIFIED"), unconfiguredQualifier, identityResolver()),
                  FixValidationError);
 
-    const auto after = parseFixMessage(makeNewOrder("AFTER"), PRIMARY_SESSION, identityResolver(), 1);
+    const auto after = parseFixMessage(makeNewOrder("AFTER"), PRIMARY_SESSION, identityResolver());
     EXPECT_EQ(after.order, before.order + 1);
 }
 
-TEST(FixTaskClientIdentityTest, UnknownIdentityNeverEntersInternalQueue) {
-    core::SharedQueue<sequencer::sequenceMessage> shardQueue(8);
-    std::vector<core::SharedQueue<sequencer::sequenceMessage>*> shardQueues{&shardQueue};
+TEST(FixTaskClientIdentityTest, UnknownIdentityNeverEntersSequencingIngress) {
+    core::SharedQueue<sequencer::sequenceMessage> sequencingIngressQueue(8);
     core::Bus bus(8);
     admission::CommandAdmissionIndex admissionIndex(8);
-    task::FixTask fixTask(shardQueues, bus, identityResolver(), admissionIndex);
+    task::FixTask fixTask(sequencingIngressQueue, bus, identityResolver(), admissionIndex);
 
     fixTask.fromApp(makeNewOrder("UNKNOWN"), UNKNOWN_SESSION);
 
     sequencer::sequenceMessage output{};
-    EXPECT_FALSE(fixTask.getFixMessageQueue()->pop(output));
-    EXPECT_TRUE(shardQueue.empty());
+    EXPECT_FALSE(fixTask.processNextStagedCommand());
+    EXPECT_FALSE(sequencingIngressQueue.pop(output));
 }
 
 TEST(FixClientIdentityConfigurationTest, RepositorySessionHasStableConfiguredClientId) {

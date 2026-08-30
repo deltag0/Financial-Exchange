@@ -1,10 +1,11 @@
 #include "../include/sequencer.hpp"
-#include <chrono>
+#include "../../core/task/include/adaptive_idle.hpp"
+
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
-#include <thread>
 
 namespace {
 
@@ -33,71 +34,74 @@ const char* markSequencedStatusName(const exchange::core::admission::MarkSequenc
 
 void exchange::sequencer::Sequencer::run() {
     std::cout << "[Sequencer] Thread started" << std::endl;
+    core::task::AdaptiveIdle idle;
     while (true) {
-        processNext();
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (drainAvailable()) {
+            idle.reset();
+        } else {
+            idle.wait();
+        }
     }
 }
 
+bool exchange::sequencer::Sequencer::drainAvailable() {
+    bool progressed = false;
+    while (processNext()) {
+        progressed = true;
+    }
+    return progressed;
+}
+
 bool exchange::sequencer::Sequencer::processNext() {
-    if (pendingSequencedCommand.has_value()) {
+    if (pendingSequencedCommand_.has_value()) {
         return handoffPendingCommand();
     }
 
-    // A Sequencer instance currently owns one shard queue.
-    if (mq_shards.empty() || mq_shards[0]->empty()) {
+    if (sequencingIngressQueue_.empty()) {
         return false;
+    }
+    if (lastAssignedSequence_.value() == std::numeric_limits<domain::CommandSequence::Underlying>::max()) {
+        throw std::overflow_error("CommandSequence exhausted");
     }
 
     sequenceMessage message{};
-    if (!mq_shards[0]->pop(message)) {
+    if (!sequencingIngressQueue_.pop(message)) {
         return false;
     }
 
-    std::cout << "[Sequencer] Processing message ID: " << message.id << " on shard: " << (int)message.shard_id
-              << " (Ticker: " << message.symbol << ")" << std::endl;
-
-    message.globalSequenceNumber = getNextGlobalSequenceNumber(message);
+    message.globalSequenceNumber = nextCommandSequence();
     if (message.type == orderType::BUY || message.type == orderType::SELL) {
         message.orderId = domain::orderIdFrom(message.globalSequenceNumber);
     }
-    message.topicSequenceNumber = getNextTopicSequenceNumber(message);
+    // Retained in the wire layout for compatibility; no authoritative consumer exists.
+    message.topicSequenceNumber = 0;
 
-    if (admissionIndex != nullptr) {
-        const core::admission::MarkSequencedStatus status = admissionIndex->markSequenced(message);
+    if (admissionIndex_ != nullptr) {
+        const core::admission::MarkSequencedStatus status = admissionIndex_->markSequenced(message);
         if (status != core::admission::MarkSequencedStatus::SEQUENCED) {
             throw std::logic_error("sequencer admission binding failed: " +
                                    std::string{markSequencedStatusName(status)});
         }
     }
 
-    pendingSequencedCommand = message;
+    pendingSequencedCommand_ = message;
     return handoffPendingCommand();
 }
 
 bool exchange::sequencer::Sequencer::handoffPendingCommand() {
-    if (!pendingSequencedCommand.has_value()) {
+    if (!pendingSequencedCommand_.has_value()) {
         return true;
     }
-    if (matchingEngineQueue == nullptr) {
-        throw std::logic_error("sequencer has no matching-engine queue");
-    }
-    if (!matchingEngineQueue->push(*pendingSequencedCommand)) {
+    if (!matchingEngineQueue_.push(*pendingSequencedCommand_)) {
         return false;
     }
-    pendingSequencedCommand.reset();
+    pendingSequencedCommand_.reset();
     return true;
 }
 
-exchange::domain::CommandSequence exchange::sequencer::Sequencer::getNextGlobalSequenceNumber(
-    const sequenceMessage& message) {
-    return domain::CommandSequence{++globalSequenceNumber};
-}
-
-uint64_t exchange::sequencer::Sequencer::getNextTopicSequenceNumber(const sequenceMessage& message) {
-    topicData& data = topicSequence[message.port];
-    data.lastSenderPort = message.port;
-    return ++data.sequenceNumber;
+exchange::domain::CommandSequence exchange::sequencer::Sequencer::nextCommandSequence() {
+    lastAssignedSequence_ = domain::CommandSequence{lastAssignedSequence_.value() + 1};
+    return lastAssignedSequence_;
 }
 
 void exchange::sequencer::Sequencer::send(sequenceMessage&) {}

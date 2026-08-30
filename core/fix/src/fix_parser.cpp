@@ -248,7 +248,7 @@ bool isProcessableMessageType(const std::string& msgType) {
 }
 
 sequencer::sequenceMessage parseFixMessage(const FIX::Message& fixMessage, const FIX::SessionID& sessionID,
-                                           const ClientIdentityResolver& clientIdentityResolver, size_t numShards) {
+                                           const ClientIdentityResolver& clientIdentityResolver) {
     try {
         FIX::MsgType msgType;
         fixMessage.getHeader().getField(msgType);
@@ -262,10 +262,6 @@ sequencer::sequenceMessage parseFixMessage(const FIX::Message& fixMessage, const
 
         // This hash remains only as a legacy transport/topic key. It is not exchange identity.
         seqMsg.port = std::hash<std::string>{}(sessionID.toString());
-
-        if (numShards == 0) {
-            throw FixValidationError("numShards must be greater than zero");
-        }
 
         /* Determine order type based on message type */
         if (msgType.getValue() == "F") {
@@ -289,10 +285,6 @@ sequencer::sequenceMessage parseFixMessage(const FIX::Message& fixMessage, const
         seqMsg.symbol[sizeof(seqMsg.symbol) - 1] = '\0';
         seqMsg.instrumentId = configuration->instrumentId;
         seqMsg.configurationVersion = configuration->configurationVersion;
-
-        /* Determine shard based on ticker hash */
-        std::string ticker{seqMsg.symbol};
-        seqMsg.shard_id = std::hash<std::string>{}(ticker) % numShards;
 
         /* Extract order quantity */
         if (seqMsg.type != sequencer::orderType::CANCEL) {

@@ -29,7 +29,7 @@
 namespace exchange::core::fix {
 
 class FixValidationError : public std::runtime_error {
-  public:
+public:
     explicit FixValidationError(const std::string &message) : std::runtime_error(message) {}
 };
 
@@ -38,12 +38,10 @@ class FixValidationError : public std::runtime_error {
  * @param fixMessage The incoming FIX message
  * @param sessionID The FIX session ID
  * @param clientIdentityResolver Stable configured FIX-session-to-client mapping
- * @param numShards The total number of message queue shards
- * @return A sequenceMessage ready to be queued, or empty if message type is not supported
+ * @return A normalized sequenceMessage ready for the process-local sequencing ingress
  */
 exchange::sequencer::sequenceMessage parseFixMessage(const FIX::Message &fixMessage, const FIX::SessionID &sessionID,
-                                                     const ClientIdentityResolver &clientIdentityResolver,
-                                                     size_t numShards);
+                                                     const ClientIdentityResolver &clientIdentityResolver);
 
 /**
  * Determines if a message is a type we should process (New Order or Cancel Order)

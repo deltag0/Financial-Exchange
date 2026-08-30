@@ -1,4 +1,5 @@
 #include "admission_completion_consumer.hpp"
+#include "../../task/include/adaptive_idle.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -44,8 +45,13 @@ bool AdmissionCompletionConsumer::processNext() {
 }
 
 [[noreturn]] void AdmissionCompletionConsumer::run() {
+    task::AdaptiveIdle idle;
     while (true) {
-        static_cast<void>(processNext());
+        if (processNext()) {
+            idle.reset();
+        } else {
+            idle.wait();
+        }
     }
 }
 

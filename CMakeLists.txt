@@ -60,6 +60,15 @@ endif()
 
 # --- Bus Unit Tests ---
 if(GTEST_FOUND)
+    add_executable(adaptive_idle_tests
+        core/task/tests/test_adaptive_idle.cpp
+    )
+    target_include_directories(adaptive_idle_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/task/include
+    )
+    target_link_libraries(adaptive_idle_tests PRIVATE GTest::gtest GTest::gtest_main)
+    add_test(NAME AdaptiveIdleUnitTests COMMAND adaptive_idle_tests)
+
     add_executable(bus_tests
         core/bus/tests/bus_test.cpp
     )
