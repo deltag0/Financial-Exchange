@@ -19,16 +19,15 @@ TEST(FixMalformed, MalformedNumericFieldsThrow) {
     msg.setField(FIX::StringField(44, "nope"));
 
     FIX::SessionID sid("FIX.4.4", "S", "T");
-    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, exchange::core::fix::test::clientIdentityResolver(), 1),
+    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, exchange::core::fix::test::clientIdentityResolver()),
                  std::exception);
 }
 
 TEST(FixMalformed, FixTaskFromAppHandlesMalformed) {
     exchange::core::SharedQueue<sequenceMessage> q(4);
-    std::vector<exchange::core::SharedQueue<sequenceMessage>*> shards{&q};
     exchange::core::Bus bus(8);
     exchange::core::admission::CommandAdmissionIndex admissionIndex(8);
-    FixTask fix_task(shards, bus, exchange::core::fix::test::clientIdentityResolver(), admissionIndex);
+    FixTask fix_task(q, bus, exchange::core::fix::test::clientIdentityResolver(), admissionIndex);
 
     FIX::Message msg;
     msg.getHeader().setField(FIX::MsgType("D"));
@@ -43,7 +42,8 @@ TEST(FixMalformed, FixTaskFromAppHandlesMalformed) {
     // fromApp should catch parse exceptions and not throw
     EXPECT_NO_THROW(fix_task.fromApp(msg, sid));
     sequenceMessage out{};
-    EXPECT_FALSE(fix_task.getFixMessageQueue()->pop(out));
+    EXPECT_FALSE(fix_task.processNextStagedCommand());
+    EXPECT_FALSE(q.pop(out));
 }
 
 TEST(FixMalformed, UnknownOverlongSymbolIsRejected) {
@@ -59,7 +59,7 @@ TEST(FixMalformed, UnknownOverlongSymbolIsRejected) {
     msg.setField(FIX::TimeInForce(FIX::TimeInForce_GOOD_TILL_CANCEL));
 
     FIX::SessionID sid("FIX.4.4", "S", "T");
-    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, exchange::core::fix::test::clientIdentityResolver(), 4),
+    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, exchange::core::fix::test::clientIdentityResolver()),
                  exchange::core::fix::FixValidationError);
 }
 
@@ -76,6 +76,6 @@ TEST(FixMalformed, UnknownNonAsciiSymbolIsRejected) {
     msg.setField(FIX::TimeInForce(FIX::TimeInForce_GOOD_TILL_CANCEL));
 
     FIX::SessionID sid("FIX.4.4", "S", "T");
-    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, exchange::core::fix::test::clientIdentityResolver(), 2),
+    EXPECT_THROW(exchange::core::fix::parseFixMessage(msg, sid, exchange::core::fix::test::clientIdentityResolver()),
                  exchange::core::fix::FixValidationError);
 }

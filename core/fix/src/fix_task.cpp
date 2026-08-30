@@ -1,4 +1,5 @@
 #include "../include/fix_task.hpp"
+#include "../../task/include/adaptive_idle.hpp"
 #include "fix_parser.hpp"
 #include <iostream>
 
@@ -42,12 +43,10 @@ void FixTask::toApp(FIX::Message &message, const FIX::SessionID &) noexcept {
 }
 
 void FixTask::fromAdmin(const FIX::Message &message, const FIX::SessionID &) noexcept {
-    std::cout << "[FixTask] <- Received Admin (Raw): " << message.toString().substr(0, 30) << "..."
-              << std::endl;
+    std::cout << "[FixTask] <- Received Admin (Raw): " << message.toString().substr(0, 30) << "..." << std::endl;
 }
 
 void FixTask::fromApp(const FIX::Message &message, const FIX::SessionID &sessionID) noexcept {
-
     try {
         FIX::MsgType msgType;
         message.getHeader().getField(msgType);
@@ -56,17 +55,16 @@ void FixTask::fromApp(const FIX::Message &message, const FIX::SessionID &session
             return;
         }
 
-        sequencer::sequenceMessage normalized =
-            fix::parseFixMessage(message, sessionID, clientIdentityResolver, mq_shards.size());
+        sequencer::sequenceMessage normalized = fix::parseFixMessage(message, sessionID, clientIdentityResolver);
         const admission::AdmissionDecision decision = commandAdmissionIndex.reserve(normalized);
         if (decision.status != admission::AdmissionStatus::FIRST_SUBMISSION) {
             std::cerr << "[FixTask] Command admission outcome: " << admissionStatusName(decision.status) << std::endl;
             return;
         }
 
-        if (!internalQueues.fixMessageQueue->push(normalized)) {
+        if (!stagingQueue_.push(normalized)) {
             const bool abandoned = commandAdmissionIndex.abandonReservation(normalized);
-            std::cerr << "[FixTask] Normalized command queue is full; reservation "
+            std::cerr << "[FixTask] Staging queue is full; reservation "
                       << (abandoned ? "abandoned" : "could not be abandoned") << std::endl;
         }
 
@@ -81,47 +79,47 @@ void FixTask::sendFixMessage(FIX::Message &message, const FIX::SessionID &sessio
     FIX::Session::sendToTarget(message, sessionID);
 }
 
-bool FixTask::trySendSequencerMessage(const sequencer::sequenceMessage &message) {
-    return mq_shards[message.shard_id]->push(message);
-}
-
-bool FixTask::processNextNormalizedCommand() {
-    if (!pendingNormalizedCommand.has_value()) {
-        sequencer::sequenceMessage message{};
-        if (!internalQueues.fixMessageQueue->pop(message)) {
+bool FixTask::processNextStagedCommand() {
+    if (!pendingStagedCommand_.has_value()) {
+        sequencer::sequenceMessage command{};
+        if (!stagingQueue_.pop(command)) {
             return false;
         }
-        pendingNormalizedCommand = message;
+        pendingStagedCommand_ = command;
     }
 
-    if (!trySendSequencerMessage(*pendingNormalizedCommand)) {
+    if (!sequencingIngressQueue_.push(*pendingStagedCommand_)) {
         return false;
     }
-    pendingNormalizedCommand.reset();
+    pendingStagedCommand_.reset();
     return true;
 }
 
 void FixTask::send(sequencer::sequenceMessage &) {}
 
 void FixTask::run() {
+    AdaptiveIdle idle;
     while (true) {
+        bool progressed = false;
         for (int i = 0; i < EXT_BURST_MESSAGES; ++i) {
-            if (!processNextNormalizedCommand()) {
+            if (!processNextStagedCommand()) {
                 break;
             }
+            progressed = true;
         }
 
         for (int i = 0; i < INT_BURST_MESSAGES; ++i) {
-            bool check = false;
             sequencer::sequenceMessage internalMsg{};
-            check = multicastBus.read(cursor, internalMsg);
+            if (!multicastBus.read(cursor, internalMsg)) {
+                break;
+            }
+            progressed = true;
+        }
 
-            if (!check) break;
-
-            // ! Just for now print it out
-            std::cout << "[FixTask] -> Multicast Internal Message ID: " << internalMsg.id
-                      << " shard: " << static_cast<int>(internalMsg.shard_id)
-                      << " symbol: " << internalMsg.symbol << std::endl;
+        if (progressed) {
+            idle.reset();
+        } else {
+            idle.wait();
         }
     }
 }

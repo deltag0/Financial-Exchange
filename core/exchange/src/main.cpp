@@ -23,33 +23,22 @@
 #undef throw
 #endif
 
-#define NUM_SHARDS 4
 #define BUS_SIZE 16384
 #define COMMAND_ADMISSION_CAPACITY 100000
+#define SEQUENCING_INGRESS_QUEUE_SIZE 1000
+#define MATCHING_ENGINE_QUEUE_SIZE 1000
 #define COMMAND_RESULT_QUEUE_SIZE 1000
 
 int main() {
-    std::cout << "Starting Exchange FIX Acceptor with " << NUM_SHARDS << " Sequencer Shards..."
-              << std::endl;
+    std::cout << "Starting Exchange FIX Acceptor with one process-local sequencing boundary..." << std::endl;
     try {
         FIX::SessionSettings settings("/app/exchange.cfg");
         const exchange::core::fix::ClientIdentityResolver clientIdentityResolver(settings);
 
-        std::vector<
-            std::unique_ptr<exchange::core::SharedQueue<exchange::sequencer::sequenceMessage>>>
-            shard_queues;
-        std::vector<exchange::core::SharedQueue<exchange::sequencer::sequenceMessage> *>
-            shard_queue_ptrs;
-        auto matching_engine_queue =
-            std::make_unique<exchange::core::SharedQueue<exchange::sequencer::sequenceMessage>>(
-                1000);
-
-        for (int i = 0; i < NUM_SHARDS; ++i) {
-            shard_queues.push_back(
-                std::make_unique<exchange::core::SharedQueue<exchange::sequencer::sequenceMessage>>(
-                    1000));
-            shard_queue_ptrs.push_back(shard_queues.back().get());
-        }
+        exchange::core::SharedQueue<exchange::sequencer::sequenceMessage> sequencingIngressQueue(
+            SEQUENCING_INGRESS_QUEUE_SIZE);
+        exchange::core::SharedQueue<exchange::sequencer::sequenceMessage> matchingEngineQueue(
+            MATCHING_ENGINE_QUEUE_SIZE);
 
         exchange::core::Bus multicastBus(BUS_SIZE);
         exchange::core::admission::CommandAdmissionIndex commandAdmissionIndex(COMMAND_ADMISSION_CAPACITY);
@@ -57,35 +46,21 @@ int main() {
         exchange::core::admission::AdmissionCompletionConsumer admissionCompletionConsumer(commandResultQueue,
                                                                                            commandAdmissionIndex);
 
-        // Initialize FIX Application with all shards
-        exchange::core::task::FixTask application(shard_queue_ptrs, multicastBus, clientIdentityResolver,
+        exchange::core::task::FixTask application(sequencingIngressQueue, multicastBus, clientIdentityResolver,
                                                   commandAdmissionIndex);
 
-        exchange::matching_engine::MatchingEngine matching_engine(matching_engine_queue.get(), multicastBus,
+        exchange::sequencer::Sequencer sequencer(sequencingIngressQueue, matchingEngineQueue, commandAdmissionIndex);
+        exchange::matching_engine::MatchingEngine matching_engine(&matchingEngineQueue, multicastBus,
                                                                   commandResultQueue);
 
-        // FixTask now owns the continuous drain loop for FIX-to-sequencer traffic.
-        // Keep it running on its own thread so the acceptor can keep handling ports.
+        // QuickFIX session threads publish admitted commands to FixTask's bounded staging queue.
+        // This worker forwards them in staging FIFO order to sequencingIngressQueue.
         std::thread fix_task_thread([&application]() { application.run(); });
 
         std::thread matching_engine_thread([&matching_engine]() { matching_engine.run(); });
         std::thread admission_completion_thread(
             [&admissionCompletionConsumer]() { admissionCompletionConsumer.run(); });
-
-        // Start 4 Sequencer threads
-        std::vector<std::unique_ptr<exchange::sequencer::Sequencer>> sequencers;
-        std::vector<std::thread> sequencer_threads;
-
-        for (int i = 0; i < NUM_SHARDS; ++i) {
-            // Each sequencer gets its own shard queue (passed as a vector of size 1)
-            std::vector<exchange::core::SharedQueue<exchange::sequencer::sequenceMessage> *>
-                single_shard = {shard_queue_ptrs[i]};
-            sequencers.push_back(std::make_unique<exchange::sequencer::Sequencer>(
-                std::move(single_shard), matching_engine_queue.get(), commandAdmissionIndex));
-
-            sequencer_threads.emplace_back([&seq = *sequencers.back()]() { seq.run(); });
-            std::cout << "[Main] Launched Sequencer Shard " << i << std::endl;
-        }
+        std::thread sequencer_thread([&sequencer]() { sequencer.run(); });
 
         FIX::FileStoreFactory storeFactory(settings);
         FIX::FileLogFactory logFactory(settings);
@@ -103,9 +78,8 @@ int main() {
             fix_task_thread.join();
         }
         acceptor.stop();
-        for (auto &t : sequencer_threads) {
-            if (t.joinable())
-                t.join();
+        if (sequencer_thread.joinable()) {
+            sequencer_thread.join();
         }
         if (matching_engine_thread.joinable()) {
             matching_engine_thread.join();

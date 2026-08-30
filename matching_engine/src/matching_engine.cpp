@@ -1,12 +1,12 @@
 #include "../include/matching_engine.hpp"
 
+#include "../../core/task/include/adaptive_idle.hpp"
 #include "../../core/task/include/task.hpp"
 #include <algorithm>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <sys/types.h>
-#include <thread>
 #include <utility>
 
 namespace exchange::matching_engine {
@@ -58,23 +58,24 @@ domain::CommandResultCorrelation resultCorrelationFrom(const sequencer::sequence
 
 MatchingEngine::MatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus,
                                BoundedCommandResultQueue& commandResultQueue)
-    : Task(std::vector<core::SharedQueue<sequencer::sequenceMessage>*>{sequencerQueue}),
-      sequencerQueue(*sequencerQueue),
-      multicastBus(multicastBus),
-      commandResultQueue(commandResultQueue) {}
+    : sequencerQueue(*sequencerQueue), multicastBus(multicastBus), commandResultQueue(commandResultQueue) {}
 
 MatchingEngine::MatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus,
                                const std::size_t ownedResultQueueCapacity)
-    : Task(std::vector<core::SharedQueue<sequencer::sequenceMessage>*>{sequencerQueue}),
-      sequencerQueue(*sequencerQueue),
+    : sequencerQueue(*sequencerQueue),
       multicastBus(multicastBus),
       ownedCommandResultQueue(std::make_unique<BoundedCommandResultQueue>(ownedResultQueueCapacity)),
       commandResultQueue(*ownedCommandResultQueue) {}
 
 void MatchingEngine::run() {
     std::cout << "[MatchingEngine] Thread started" << std::endl;
+    core::task::AdaptiveIdle idle;
     while (true) {
-        drainQueue(sequencerQueue, "Sequencer");
+        if (drainQueue(sequencerQueue, "Sequencer")) {
+            idle.reset();
+        } else {
+            idle.wait();
+        }
     }
 }
 
@@ -84,18 +85,19 @@ void MatchingEngine::send(sequencer::sequenceMessage& message) {
     }
 }
 
-void MatchingEngine::drainQueue(core::SharedQueue<sequencer::sequenceMessage>& queue, const char* source,
+bool MatchingEngine::drainQueue(core::SharedQueue<sequencer::sequenceMessage>& queue, const char* source,
                                 std::size_t index) {
-    if (!handoffPendingResult()) {
-        return;
+    bool progressed = false;
+    if (pendingCommandResult != nullptr) {
+        if (!handoffPendingResult()) {
+            return false;
+        }
+        progressed = true;
     }
 
-    while (!queue.empty()) {
-        sequencer::sequenceMessage message{};
-        if (!queue.pop(message)) {
-            return;
-        }
-
+    sequencer::sequenceMessage message{};
+    while (queue.pop(message)) {
+        progressed = true;
         const domain::CommandResultCorrelation correlation = resultCorrelationFrom(message);
         ProcessingOutcome outcome = processMessage(message);
         ImmutableCommandResultBatch batch =
@@ -104,9 +106,10 @@ void MatchingEngine::drainQueue(core::SharedQueue<sequencer::sequenceMessage>& q
         send(message);
         if (!commandResultQueue.tryPush(batch)) {
             pendingCommandResult = std::move(batch);
-            return;
+            return true;
         }
     }
+    return progressed;
 }
 
 bool MatchingEngine::handoffPendingResult() {

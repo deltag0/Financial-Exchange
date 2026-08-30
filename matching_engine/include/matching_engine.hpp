@@ -73,8 +73,7 @@ protected:
         OrderList::iterator orderLocation;
     };
 
-    void drainQueues(const char* source);
-    void drainQueue(core::SharedQueue<sequencer::sequenceMessage>& queue, const char* source, std::size_t index = 0);
+    bool drainQueue(core::SharedQueue<sequencer::sequenceMessage>& queue, const char* source, std::size_t index = 0);
 
     ProcessingOutcome processMessage(const sequencer::sequenceMessage& message);
 

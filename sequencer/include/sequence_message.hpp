@@ -76,7 +76,7 @@ Message format transmitted to the matching engine
 id: client-generated unique ID assigned to order
 targetOrderId: authoritative exchange OrderId targeted by a normalized cancel
 globalSequenceNumber: unique ID assigned by the sequencer for each ticker globally
-topicSequenceNumber: unique ID assigned by the sequencer for each ticker and client port combination
+topicSequenceNumber: reserved non-authoritative compatibility field; production sequencing writes zero
 timestamp: timestamp of the order, nanoseconds since epoch
 order: Order assigned by received by the server
 port: port of the client
@@ -85,7 +85,7 @@ quantity: quantity of the order
 symbol: symbol of the order
 type: type of the order
 expiry: expiry time of the order
-shard_id: shard ID assigned by the sequencer for the order
+shard_id: reserved non-authoritative partition metadata; the FIX adapter does not route on it
 tif: time in force of the order
 */
 struct sequenceMessage {
