@@ -11,11 +11,13 @@ target_include_directories(sequencer_lib PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 # Link the core exchange headers to the sequencer library
 target_link_libraries(sequencer_lib PUBLIC core_lib)
 
-add_executable(sequencer_production_loop_benchmark
-    tests/benchmark_production_loop.cpp
+add_executable(sequencer_production_loop_smoke
+    tests/test_production_loop_smoke.cpp
 )
-target_include_directories(sequencer_production_loop_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ..)
-target_link_libraries(sequencer_production_loop_benchmark PRIVATE sequencer_lib)
+target_include_directories(sequencer_production_loop_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ..)
+target_link_libraries(sequencer_production_loop_smoke PRIVATE sequencer_lib)
+add_test(NAME SequencerProductionLoopSmokeTest COMMAND sequencer_production_loop_smoke)
+set_tests_properties(SequencerProductionLoopSmokeTest PROPERTIES TIMEOUT 5)
 
 # Boost Interprocess needs rt (Real Time) library on some Unix systems
 if(UNIX AND NOT APPLE)

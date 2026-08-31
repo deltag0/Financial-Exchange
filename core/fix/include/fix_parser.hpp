@@ -6,10 +6,8 @@
 #include "../../shared_queue/include/shared_queue.hpp"
 
 // Pre-include STL headers so the throw(...) macro hack doesn't break them.
-#include <atomic>
 #include <chrono>
 #include <cstring>
-#include <iostream>
 #include <stdexcept>
 #include <string>
 

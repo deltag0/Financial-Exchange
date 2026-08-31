@@ -146,7 +146,7 @@ TEST(SequencerCancelNormalizationTest, ValidFixCancelGetsDistinctSequenceAndReac
     EXPECT_EQ(cancelled->reason, domain::CancelReason::CLIENT_REQUESTED);
 }
 
-TEST(SequencerClientIdentityTest, OwnershipUsesConfiguredClientIdDespiteChangedAndCollidingLegacyPorts) {
+TEST(SequencerClientIdentityTest, OwnershipUsesConfiguredClientIdAcrossSessions) {
     core::SharedQueue<sequencer::sequenceMessage> sequencingIngressQueue(16);
     core::SharedQueue<sequencer::sequenceMessage> matchingQueue(16);
     core::Bus bus(16);
@@ -165,15 +165,13 @@ TEST(SequencerClientIdentityTest, OwnershipUsesConfiguredClientIdDespiteChangedA
     matching_engine::BoundedCommandResultQueue resultQueue(8);
     TestableMatchingEngine matchingEngine(&matchingQueue, bus, resultQueue);
 
-    const auto normalizeAndSequence =
-        [&](const FIX::Message& message, const FIX::SessionID& session,
-            const std::uint64_t forcedLegacyPort) -> std::optional<sequencer::sequenceMessage> {
+    const auto normalizeAndSequence = [&](const FIX::Message& message,
+                                          const FIX::SessionID& session) -> std::optional<sequencer::sequenceMessage> {
         fixTask.fromApp(message, session);
         sequencer::sequenceMessage normalized{};
         if (!fixTask.processNextStagedCommand() || !sequencingIngressQueue.pop(normalized)) {
             return std::nullopt;
         }
-        normalized.port = forcedLegacyPort;
         if (!sequencingIngressQueue.push(normalized)) {
             return std::nullopt;
         }
@@ -198,14 +196,14 @@ TEST(SequencerClientIdentityTest, OwnershipUsesConfiguredClientIdDespiteChangedA
         return result;
     };
 
-    const auto firstNew = normalizeAndSequence(makeFixNewOrder("NEW-1"), primarySession, 111);
+    const auto firstNew = normalizeAndSequence(makeFixNewOrder("NEW-1"), primarySession);
     ASSERT_TRUE(firstNew.has_value());
     EXPECT_EQ(firstNew->globalSequenceNumber, domain::CommandSequence{1});
     EXPECT_EQ(firstNew->orderId, domain::OrderId{1});
     EXPECT_EQ(firstNew->clientId, domain::ClientId{7001});
     ASSERT_TRUE(match(*firstNew));
 
-    const auto secondNew = normalizeAndSequence(makeFixNewOrder("NEW-2"), primarySession, 222);
+    const auto secondNew = normalizeAndSequence(makeFixNewOrder("NEW-2"), primarySession);
     ASSERT_TRUE(secondNew.has_value());
     EXPECT_EQ(secondNew->globalSequenceNumber, domain::CommandSequence{2});
     EXPECT_EQ(secondNew->orderId, domain::OrderId{2});
@@ -219,13 +217,12 @@ TEST(SequencerClientIdentityTest, OwnershipUsesConfiguredClientIdDespiteChangedA
     EXPECT_FALSE(sequencer.processOnce());
     EXPECT_TRUE(matchingQueue.empty());
 
-    const auto alternateCancel = normalizeAndSequence(makeFixCancel("ALT-CANCEL", "1"), alternateSession, 333);
+    const auto alternateCancel = normalizeAndSequence(makeFixCancel("ALT-CANCEL", "1"), alternateSession);
     ASSERT_TRUE(alternateCancel.has_value());
     EXPECT_EQ(alternateCancel->globalSequenceNumber, domain::CommandSequence{3});
     EXPECT_EQ(alternateCancel->orderId, domain::OrderId{});
     EXPECT_EQ(alternateCancel->targetOrderId, std::optional<domain::TargetOrderId>{domain::TargetOrderId{1}});
     EXPECT_EQ(alternateCancel->clientId, domain::ClientId{7001});
-    EXPECT_NE(alternateCancel->port, firstNew->port);
     const matching_engine::ImmutableCommandResultBatch alternateResult = match(*alternateCancel);
     ASSERT_TRUE(alternateResult);
     ASSERT_EQ(alternateResult->events().size(), 1u);
@@ -233,12 +230,10 @@ TEST(SequencerClientIdentityTest, OwnershipUsesConfiguredClientIdDespiteChangedA
     ASSERT_NE(cancelled, nullptr);
     EXPECT_EQ(cancelled->reason, domain::CancelReason::CLIENT_REQUESTED);
 
-    const auto otherClientCancel =
-        normalizeAndSequence(makeFixCancel("OTHER-CANCEL", "2"), otherClientSession, alternateCancel->port);
+    const auto otherClientCancel = normalizeAndSequence(makeFixCancel("OTHER-CANCEL", "2"), otherClientSession);
     ASSERT_TRUE(otherClientCancel.has_value());
     EXPECT_EQ(otherClientCancel->globalSequenceNumber, domain::CommandSequence{4});
     EXPECT_EQ(otherClientCancel->clientId, domain::ClientId{8002});
-    EXPECT_EQ(otherClientCancel->port, alternateCancel->port);
     const matching_engine::ImmutableCommandResultBatch otherResult = match(*otherClientCancel);
     ASSERT_TRUE(otherResult);
     ASSERT_EQ(otherResult->events().size(), 1u);
@@ -317,7 +312,7 @@ TEST(SequencerHandoffTest, FullMatchingQueueRetainsSequencedCommandWithoutOverta
     TestableSequencer sequencer(sequencingIngressQueue, matchingQueue, admissionIndex);
 
     sequencer::sequenceMessage blocker{};
-    blocker.id = 999;
+    blocker.globalSequenceNumber = domain::CommandSequence{999};
     ASSERT_TRUE(matchingQueue.push(blocker));
     fixTask.fromApp(makeFixNewOrder("FIRST"), session);
     fixTask.fromApp(makeFixNewOrder("SECOND"), session);
@@ -338,7 +333,7 @@ TEST(SequencerHandoffTest, FullMatchingQueueRetainsSequencedCommandWithoutOverta
 
     sequencer::sequenceMessage removedBlocker{};
     ASSERT_TRUE(matchingQueue.pop(removedBlocker));
-    ASSERT_EQ(removedBlocker.id, 999u);
+    ASSERT_EQ(removedBlocker.globalSequenceNumber, domain::CommandSequence{999});
     ASSERT_TRUE(sequencer.drainActive());
     ASSERT_TRUE(sequencer.hasPendingSequencedCommand());
     ASSERT_TRUE(sequencer.pendingCommand().has_value());
@@ -361,16 +356,15 @@ TEST(SequencerHandoffTest, FullMatchingQueueRetainsSequencedCommandWithoutOverta
     EXPECT_FALSE(sequencer.drainActive());
 }
 
-TEST(SequencerRunLoopTest, ActiveCycleDrainsAvailableCommandsAndZerosLegacyTopicSequence) {
+TEST(SequencerRunLoopTest, ActiveCycleDrainsAvailableCommandsInFifoOrder) {
     core::SharedQueue<sequencer::sequenceMessage> sequencingIngressQueue(4);
     core::SharedQueue<sequencer::sequenceMessage> matchingQueue(4);
     TestableSequencer sequencer(sequencingIngressQueue, matchingQueue, sequencer::Sequencer::INTERNAL_ADMISSION_BYPASS);
 
-    for (std::uint64_t id = 1; id <= 3; ++id) {
+    for (std::uint64_t inputOrder = 1; inputOrder <= 3; ++inputOrder) {
         sequencer::sequenceMessage command{};
-        command.id = id;
         command.type = sequencer::orderType::BUY;
-        command.topicSequenceNumber = 999;
+        command.configurationVersion = inputOrder;
         ASSERT_TRUE(sequencingIngressQueue.push(command));
     }
 
@@ -379,10 +373,9 @@ TEST(SequencerRunLoopTest, ActiveCycleDrainsAvailableCommandsAndZerosLegacyTopic
     for (std::uint64_t sequence = 1; sequence <= 3; ++sequence) {
         sequencer::sequenceMessage command{};
         ASSERT_TRUE(matchingQueue.pop(command));
-        EXPECT_EQ(command.id, sequence);
+        EXPECT_EQ(command.configurationVersion, sequence);
         EXPECT_EQ(command.globalSequenceNumber, domain::CommandSequence{sequence});
         EXPECT_EQ(command.orderId, domain::OrderId{sequence});
-        EXPECT_EQ(command.topicSequenceNumber, 0u);
     }
 }
 
@@ -635,12 +628,9 @@ TEST(E2EThroughputTest, SequencerToMatchingEngineThroughput) {
 
     while (std::chrono::high_resolution_clock::now() < end_time) {
         sequencer::sequenceMessage msg{};
-        msg.id = client_messages_sent;
         msg.shard_id = static_cast<std::uint8_t>(client_messages_sent % 4);
         msg.price = domain::Price{static_cast<std::uint64_t>((client_messages_sent % 100) + 1)};
         msg.quantity = domain::Quantity{10};
-        msg.port = (client_messages_sent % 100);
-        msg.topic = msg.port;
         strcpy(msg.symbol, "SPY");
         msg.type = sequencer::orderType::BUY;
 

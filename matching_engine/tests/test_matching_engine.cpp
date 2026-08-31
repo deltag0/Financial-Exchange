@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <string>
+#include <thread>
 #include <type_traits>
 
 #include "../../bus/include/bus.hpp"
@@ -135,7 +137,6 @@ sequencer::sequenceMessage makeOrder(uint64_t id, sequencer::orderType type, con
                                      uint64_t quantity, core::task::TimeInForce tif,
                                      domain::InstrumentId instrumentId = domain::InstrumentId{1}) {
     sequencer::sequenceMessage message{};
-    message.id = id;
     message.globalSequenceNumber = domain::CommandSequence{id};
     message.orderId = domain::orderIdFrom(message.globalSequenceNumber);
     message.clientId = domain::ClientId{1000 + id};
@@ -153,7 +154,6 @@ sequencer::sequenceMessage makeOrder(uint64_t id, sequencer::orderType type, con
 sequencer::sequenceMessage makeCancel(uint64_t commandSequence, uint64_t clientId, uint64_t targetOrderId,
                                       domain::InstrumentId instrumentId = domain::InstrumentId{1}) {
     sequencer::sequenceMessage message{};
-    message.id = commandSequence;
     message.globalSequenceNumber = domain::CommandSequence{commandSequence};
     message.clientId = domain::ClientId{clientId};
     message.clientCommandId.emplace("CANCEL-" + std::to_string(commandSequence));
@@ -241,6 +241,74 @@ TEST(MatchingEngineTest, ProcessOnceEmptyDoesNothing) {
     EXPECT_TRUE(seq_q.empty());
 }
 
+TEST(MatchingEngineTest, MulticastSaturationCountsOneFailureWithoutChangingMatchingResults) {
+    core::SharedQueue<sequencer::sequenceMessage> seq_q(2);
+    core::Bus bus(1);
+    std::atomic<core::Bus::cursor_type> stalledCursor{0};
+    bus.registerCursor(stalledCursor);
+    matching_engine::BoundedCommandResultQueue resultQueue(2);
+    TestableMatchingEngine engine(&seq_q, bus, resultQueue);
+
+    const auto first = makeOrder(1, sequencer::orderType::BUY, "SPY", 100, 10, core::task::TimeInForce::GTC);
+    const auto second = makeOrder(2, sequencer::orderType::BUY, "SPY", 99, 20, core::task::TimeInForce::GTC);
+    ASSERT_TRUE(seq_q.push(first));
+    ASSERT_TRUE(seq_q.push(second));
+
+    engine.invokeDrain();
+
+    EXPECT_EQ(engine.multicastWriteFailures(), 1u);
+    EXPECT_TRUE(seq_q.empty());
+    EXPECT_EQ(engine.activeOrderCount(), 2u);
+    EXPECT_EQ(engine.activeRemainingQuantity(domain::OrderId{1}), 10u);
+    EXPECT_EQ(engine.activeRemainingQuantity(domain::OrderId{2}), 20u);
+    EXPECT_TRUE(engine.stateIsConsistent());
+
+    matching_engine::ImmutableCommandResultBatch firstResult;
+    matching_engine::ImmutableCommandResultBatch secondResult;
+    ASSERT_TRUE(resultQueue.tryPop(firstResult));
+    ASSERT_TRUE(resultQueue.tryPop(secondResult));
+    ASSERT_NE(firstResult, nullptr);
+    ASSERT_NE(secondResult, nullptr);
+    EXPECT_EQ(firstResult->commandSequence(), domain::CommandSequence{1});
+    EXPECT_EQ(secondResult->commandSequence(), domain::CommandSequence{2});
+    EXPECT_EQ(firstResult->result(), matching_engine::ProcessingResult::APPLIED);
+    EXPECT_EQ(secondResult->result(), matching_engine::ProcessingResult::APPLIED);
+    ASSERT_EQ(firstResult->events().size(), 1u);
+    ASSERT_EQ(secondResult->events().size(), 1u);
+    EXPECT_NE(std::get_if<domain::OrderRested>(&firstResult->events().front()), nullptr);
+    EXPECT_NE(std::get_if<domain::OrderRested>(&secondResult->events().front()), nullptr);
+}
+
+TEST(MatchingEngineTest, MulticastFailureCounterSupportsConcurrentDiagnosticSnapshots) {
+    constexpr std::size_t failedPublications = 1'000;
+    core::SharedQueue<sequencer::sequenceMessage> seq_q(1);
+    core::Bus bus(1);
+    std::atomic<core::Bus::cursor_type> stalledCursor{0};
+    bus.registerCursor(stalledCursor);
+    TestableMatchingEngine engine(&seq_q, bus);
+    auto message = makeOrder(1, sequencer::orderType::BUY, "SPY", 100, 1, core::task::TimeInForce::GTC);
+    ASSERT_TRUE(bus.write(message));
+    std::atomic<bool> writerDone{false};
+    std::thread writer([&]() {
+        for (std::size_t publication = 0; publication < failedPublications; ++publication) {
+            engine.send(message);
+        }
+        writerDone.store(true, std::memory_order_release);
+    });
+
+    std::uint64_t previous = 0;
+    bool monotonic = true;
+    while (!writerDone.load(std::memory_order_acquire)) {
+        const std::uint64_t current = engine.multicastWriteFailures();
+        monotonic = monotonic && current >= previous;
+        previous = current;
+    }
+    writer.join();
+
+    EXPECT_TRUE(monotonic);
+    EXPECT_EQ(engine.multicastWriteFailures(), failedPublications);
+}
+
 TEST(MatchingEngineEventHandoffTest, DeliversOneCompleteImmutableBatchWithEventsInOrder) {
     core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
     core::Bus bus(8);
@@ -299,11 +367,6 @@ TEST(MatchingEngineEventHandoffTest, NewOrderAndCancelBatchesUseExactIncomingCor
 
     sequencer::sequenceMessage order =
         makeOrder(11, sequencer::orderType::BUY, "LEGACY", 100, 10, core::task::TimeInForce::GTC);
-    order.port = 999;
-    order.topic = 888;
-    order.topicSequenceNumber = 777;
-    order.timestamp = 666;
-    order.order = 555;
     order.shard_id = 3;
     ASSERT_TRUE(seq_q.push(order));
     engine.invokeDrain();
@@ -321,11 +384,6 @@ TEST(MatchingEngineEventHandoffTest, NewOrderAndCancelBatchesUseExactIncomingCor
 
     sequencer::sequenceMessage cancel = makeCancel(12, 7012, 999);
     std::strcpy(cancel.symbol, "OTHER");
-    cancel.port = order.port;
-    cancel.topic = order.topic;
-    cancel.topicSequenceNumber = order.topicSequenceNumber;
-    cancel.timestamp = order.timestamp;
-    cancel.order = order.order;
     cancel.shard_id = order.shard_id;
     ASSERT_TRUE(seq_q.push(cancel));
     engine.invokeDrain();

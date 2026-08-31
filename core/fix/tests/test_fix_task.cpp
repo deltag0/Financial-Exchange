@@ -3,6 +3,11 @@
 #include "fix_test_identities.hpp"
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <barrier>
+#include <thread>
+#include <vector>
+
 using namespace exchange::core::task;
 using namespace exchange::sequencer;
 
@@ -57,7 +62,7 @@ TEST(FixTaskTest, FullSequencingIngressRetainsOnePendingAndForwardsExactlyOnceIn
     const FIX::SessionID session("FIX.4.4", "SENDER", "TARGET");
 
     sequenceMessage blocker{};
-    blocker.id = 999;
+    blocker.globalSequenceNumber = exchange::domain::CommandSequence{999};
     ASSERT_TRUE(sequencingIngressQueue.push(blocker));
     fixTask.fromApp(makeNewOrder("FIRST"), session);
     EXPECT_FALSE(fixTask.processNextStagedCommand());
@@ -75,7 +80,7 @@ TEST(FixTaskTest, FullSequencingIngressRetainsOnePendingAndForwardsExactlyOnceIn
 
     sequenceMessage removedBlocker{};
     ASSERT_TRUE(sequencingIngressQueue.pop(removedBlocker));
-    ASSERT_EQ(removedBlocker.id, 999u);
+    ASSERT_EQ(removedBlocker.globalSequenceNumber, exchange::domain::CommandSequence{999});
     ASSERT_TRUE(fixTask.processNextStagedCommand());
     EXPECT_FALSE(fixTask.hasPendingStagedCommand());
 
@@ -105,6 +110,8 @@ TEST(FixTaskTest, FullStagingQueueAbandonsReservationAndAllowsIdenticalRetry) {
     fixTask.fromApp(makeNewOrder("RETRY"), session);
     EXPECT_EQ(admissionIndex.size(), 1u);
     EXPECT_EQ(admissionIndex.statistics().firstSubmissions, 2u);
+    EXPECT_EQ(fixTask.statistics().stagingQueueSaturations, 1u);
+    EXPECT_EQ(fixTask.statistics().reservationAbandonFailures, 0u);
 
     ASSERT_TRUE(fixTask.processNextStagedCommand());
     sequenceMessage first{};
@@ -122,4 +129,81 @@ TEST(FixTaskTest, FullStagingQueueAbandonsReservationAndAllowsIdenticalRetry) {
     ASSERT_TRUE(retry.clientCommandId.has_value());
     EXPECT_EQ(retry.clientCommandId->value(), "RETRY");
     EXPECT_TRUE(sequencingIngressQueue.empty());
+}
+
+TEST(FixTaskTest, ConcurrentNormalizationRejectionsHaveAnExactMonotonicDiagnosticCount) {
+    constexpr std::size_t producerCount = 8;
+    constexpr std::size_t rejectionsPerProducer = 64;
+    exchange::core::SharedQueue<sequenceMessage> sequencingIngressQueue(1);
+    exchange::core::Bus bus(8);
+    exchange::core::admission::CommandAdmissionIndex admissionIndex(8);
+    FixTask fixTask(sequencingIngressQueue, bus, exchange::core::fix::test::clientIdentityResolver(), admissionIndex,
+                    1);
+    const FIX::SessionID session("FIX.4.4", "SENDER", "TARGET");
+    std::barrier start(static_cast<std::ptrdiff_t>(producerCount + 1));
+    std::atomic<std::size_t> completedProducers{0};
+    std::vector<std::thread> producers;
+    producers.reserve(producerCount);
+
+    for (std::size_t producer = 0; producer < producerCount; ++producer) {
+        producers.emplace_back([&, producer]() {
+            FIX::Message invalid = makeNewOrder("INVALID-" + std::to_string(producer));
+            invalid.removeField(FIX::FIELD::Symbol);
+            start.arrive_and_wait();
+            for (std::size_t attempt = 0; attempt < rejectionsPerProducer; ++attempt) {
+                fixTask.fromApp(invalid, session);
+            }
+            completedProducers.fetch_add(1, std::memory_order_release);
+        });
+    }
+
+    start.arrive_and_wait();
+    std::uint64_t previous = 0;
+    bool monotonic = true;
+    while (completedProducers.load(std::memory_order_acquire) != producerCount) {
+        const std::uint64_t current = fixTask.statistics().normalizationRejections;
+        monotonic = monotonic && current >= previous;
+        previous = current;
+        std::this_thread::yield();
+    }
+    for (std::thread& producer : producers) {
+        producer.join();
+    }
+
+    EXPECT_TRUE(monotonic);
+    EXPECT_EQ(fixTask.statistics().normalizationRejections, producerCount * rejectionsPerProducer);
+    EXPECT_EQ(fixTask.statistics().internalFailures, 0u);
+    EXPECT_EQ(admissionIndex.size(), 0u);
+    EXPECT_TRUE(fixTask.stagingQueueEmpty());
+}
+
+TEST(FixTaskTest, ConcurrentStagingSaturationCountsEachRejectedHandoffAndAbandonsItsReservation) {
+    constexpr std::size_t producerCount = 8;
+    exchange::core::SharedQueue<sequenceMessage> sequencingIngressQueue(1);
+    exchange::core::Bus bus(8);
+    exchange::core::admission::CommandAdmissionIndex admissionIndex(producerCount);
+    FixTask fixTask(sequencingIngressQueue, bus, exchange::core::fix::test::clientIdentityResolver(), admissionIndex,
+                    1);
+    const FIX::SessionID session("FIX.4.4", "SENDER", "TARGET");
+    std::barrier start(static_cast<std::ptrdiff_t>(producerCount));
+    std::vector<std::thread> producers;
+    producers.reserve(producerCount);
+
+    for (std::size_t producer = 0; producer < producerCount; ++producer) {
+        producers.emplace_back([&, producer]() {
+            start.arrive_and_wait();
+            fixTask.fromApp(makeNewOrder("CONCURRENT-" + std::to_string(producer)), session);
+        });
+    }
+    for (std::thread& producer : producers) {
+        producer.join();
+    }
+
+    const FixTaskStatistics statistics = fixTask.statistics();
+    EXPECT_EQ(statistics.normalizationRejections, 0u);
+    EXPECT_EQ(statistics.internalFailures, 0u);
+    EXPECT_EQ(statistics.stagingQueueSaturations, producerCount - 1);
+    EXPECT_EQ(statistics.reservationAbandonFailures, 0u);
+    EXPECT_EQ(admissionIndex.statistics().firstSubmissions, producerCount);
+    EXPECT_EQ(admissionIndex.size(), 1u);
 }

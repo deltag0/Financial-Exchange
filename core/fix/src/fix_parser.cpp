@@ -2,11 +2,8 @@
 #include "instrument_config.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cstring>
-#include <functional>
-#include <iostream>
 #include <limits>
 #include <string_view>
 
@@ -14,9 +11,6 @@
 #include <quickfix/FixFields.h>
 
 namespace exchange::core::fix {
-
-/* Global order counter */
-std::atomic<uint64_t> orderCounter{0};
 
 namespace {
 
@@ -249,79 +243,65 @@ bool isProcessableMessageType(const std::string& msgType) {
 
 sequencer::sequenceMessage parseFixMessage(const FIX::Message& fixMessage, const FIX::SessionID& sessionID,
                                            const ClientIdentityResolver& clientIdentityResolver) {
-    try {
-        FIX::MsgType msgType;
-        fixMessage.getHeader().getField(msgType);
+    FIX::MsgType msgType;
+    fixMessage.getHeader().getField(msgType);
 
-        sequencer::sequenceMessage seqMsg{};
-        const std::optional<domain::ClientId> clientId = clientIdentityResolver.resolve(sessionID);
-        if (!clientId.has_value()) {
-            throw FixValidationError("unknown or unauthorized FIX session identity");
-        }
-        seqMsg.clientId = *clientId;
-
-        // This hash remains only as a legacy transport/topic key. It is not exchange identity.
-        seqMsg.port = std::hash<std::string>{}(sessionID.toString());
-
-        /* Determine order type based on message type */
-        if (msgType.getValue() == "F") {
-            seqMsg.type = sequencer::orderType::CANCEL;
-        } else if (msgType.getValue() == "D") {
-            validateNewOrderType(fixMessage);
-            seqMsg.type = extractSide(fixMessage);
-        }
-
-        /* Resolve the authoritative instrument configuration. */
-        FIX::Symbol symbol;
-        if (!fixMessage.isSetField(symbol)) {
-            throw FIX::FieldNotFound(FIX::FIELD::Symbol);
-        }
-        fixMessage.getField(symbol);
-        const instrument::InstrumentConfiguration* configuration = instrument::findBySymbol(symbol.getValue());
-        if (configuration == nullptr) {
-            throw FixValidationError("unknown or inactive instrument");
-        }
-        std::strncpy(seqMsg.symbol, symbol.getValue().c_str(), sizeof(seqMsg.symbol) - 1);
-        seqMsg.symbol[sizeof(seqMsg.symbol) - 1] = '\0';
-        seqMsg.instrumentId = configuration->instrumentId;
-        seqMsg.configurationVersion = configuration->configurationVersion;
-
-        /* Extract order quantity */
-        if (seqMsg.type != sequencer::orderType::CANCEL) {
-            seqMsg.quantity = extractOrderQty(fixMessage, *configuration);
-        }
-
-        /* Extract price as an exact number of configured ticks. */
-        if (seqMsg.type != sequencer::orderType::CANCEL) {
-            seqMsg.price = extractLimitPrice(fixMessage, *configuration);
-        }
-
-        /* Extract order ID */
-        FIX::ClOrdID clOrdID;
-        fixMessage.getField(clOrdID);
-        seqMsg.clientCommandId.emplace(clOrdID.getValue());
-        seqMsg.id = std::hash<std::string>{}(clOrdID.getValue());
-
-        if (seqMsg.type == sequencer::orderType::CANCEL) {
-            seqMsg.targetOrderId.emplace(extractTargetOrderId(fixMessage));
-        } else {
-            seqMsg.tif = extractTimeInForce(fixMessage);
-            seqMsg.expiry = validateExpiry(fixMessage);
-        }
-
-        /* Assign global order counter and timestamp */
-        seqMsg.order = orderCounter.fetch_add(1, std::memory_order_seq_cst);
-        seqMsg.timestamp = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-
-        return seqMsg;
-
-    } catch (const FIX::FieldNotFound& e) {
-        std::cerr << "[FixParser] Required field missing: " << e.field << std::endl;
-        throw;
-    } catch (const std::exception& e) {
-        std::cerr << "[FixParser] Error parsing FIX message: " << e.what() << std::endl;
-        throw;
+    sequencer::sequenceMessage seqMsg{};
+    const std::optional<domain::ClientId> clientId = clientIdentityResolver.resolve(sessionID);
+    if (!clientId.has_value()) {
+        throw FixValidationError("unknown or unauthorized FIX session identity");
     }
+    seqMsg.clientId = *clientId;
+
+    /* Determine order type based on message type */
+    if (msgType.getValue() == "F") {
+        seqMsg.type = sequencer::orderType::CANCEL;
+    } else if (msgType.getValue() == "D") {
+        validateNewOrderType(fixMessage);
+        seqMsg.type = extractSide(fixMessage);
+    }
+
+    /* Resolve the authoritative instrument configuration. */
+    FIX::Symbol symbol;
+    if (!fixMessage.isSetField(symbol)) {
+        throw FIX::FieldNotFound(FIX::FIELD::Symbol);
+    }
+    fixMessage.getField(symbol);
+    const instrument::InstrumentConfiguration* configuration = instrument::findBySymbol(symbol.getValue());
+    if (configuration == nullptr) {
+        throw FixValidationError("unknown or inactive instrument");
+    }
+    std::strncpy(seqMsg.symbol, symbol.getValue().c_str(), sizeof(seqMsg.symbol) - 1);
+    seqMsg.symbol[sizeof(seqMsg.symbol) - 1] = '\0';
+    seqMsg.instrumentId = configuration->instrumentId;
+    seqMsg.configurationVersion = configuration->configurationVersion;
+
+    /* Extract order quantity */
+    if (seqMsg.type != sequencer::orderType::CANCEL) {
+        seqMsg.quantity = extractOrderQty(fixMessage, *configuration);
+    }
+
+    /* Extract price as an exact number of configured ticks. */
+    if (seqMsg.type != sequencer::orderType::CANCEL) {
+        seqMsg.price = extractLimitPrice(fixMessage, *configuration);
+    }
+
+    FIX::ClOrdID clOrdID;
+    fixMessage.getField(clOrdID);
+    try {
+        seqMsg.clientCommandId.emplace(clOrdID.getValue());
+    } catch (const std::invalid_argument& exception) {
+        throw FixValidationError(exception.what());
+    }
+
+    if (seqMsg.type == sequencer::orderType::CANCEL) {
+        seqMsg.targetOrderId.emplace(extractTargetOrderId(fixMessage));
+    } else {
+        seqMsg.tif = extractTimeInForce(fixMessage);
+        seqMsg.expiry = validateExpiry(fixMessage);
+    }
+
+    return seqMsg;
 }
 
 } /* namespace exchange::core::fix */

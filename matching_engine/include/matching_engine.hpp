@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
 #include <iterator>
 #include <list>
 #include <map>
@@ -26,6 +27,9 @@ public:
 
     void run() override;
     void send(sequencer::sequenceMessage& message) override;
+    [[nodiscard]] std::uint64_t multicastWriteFailures() const noexcept {
+        return multicastWriteFailures_.load(std::memory_order_relaxed);
+    }
 
 protected:
     MatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus,
@@ -125,6 +129,7 @@ protected:
     std::unique_ptr<BoundedCommandResultQueue> ownedCommandResultQueue;
     BoundedCommandResultQueue& commandResultQueue;
     ImmutableCommandResultBatch pendingCommandResult;
+    std::atomic<std::uint64_t> multicastWriteFailures_{0};
 
     std::map<domain::InstrumentId, InstrumentBook> orderBooks;
 

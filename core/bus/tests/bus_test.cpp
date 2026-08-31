@@ -7,10 +7,10 @@
 namespace exchange::core::test {
 
 namespace {
-// Build a sequenceMessage carrying an identifying id so tests can assert ordering/identity.
-sequencer::sequenceMessage msg(uint64_t id) {
+// Carry an authoritative sequence value so tests can assert ordering and identity.
+sequencer::sequenceMessage msg(uint64_t sequence) {
     sequencer::sequenceMessage m{};
-    m.id = id;
+    m.globalSequenceNumber = domain::CommandSequence{sequence};
     return m;
 }
 } // namespace
@@ -27,7 +27,7 @@ TEST(BusTest, BasicWriteRead) {
     // Read it back
     sequencer::sequenceMessage value{};
     EXPECT_TRUE(bus.read(cursor, value));
-    EXPECT_EQ(value.id, 42u);
+    EXPECT_EQ(value.globalSequenceNumber, domain::CommandSequence{42});
     EXPECT_EQ(cursor.load(), 1u);
 }
 
@@ -46,7 +46,7 @@ TEST(BusTest, SequentialWriteRead) {
     for (int i = 0; i < 5; ++i) {
         sequencer::sequenceMessage value{};
         EXPECT_TRUE(bus.read(cursor, value));
-        EXPECT_EQ(value.id, static_cast<uint64_t>(i * 10));
+        EXPECT_EQ(value.globalSequenceNumber, domain::CommandSequence{static_cast<uint64_t>(i * 10)});
     }
 }
 
@@ -75,7 +75,7 @@ TEST(BusTest, WrapAroundWrite) {
     for (int i = 0; i < 4; ++i) {
         sequencer::sequenceMessage value{};
         EXPECT_TRUE(bus.read(cursor, value));
-        EXPECT_EQ(value.id, static_cast<uint64_t>(i));
+        EXPECT_EQ(value.globalSequenceNumber, domain::CommandSequence{static_cast<uint64_t>(i)});
     }
 
     // Now we can write more (cursor advanced)
@@ -87,7 +87,7 @@ TEST(BusTest, WrapAroundWrite) {
     for (int i = 4; i < 8; ++i) {
         sequencer::sequenceMessage value{};
         EXPECT_TRUE(bus.read(cursor, value));
-        EXPECT_EQ(value.id, static_cast<uint64_t>(i));
+        EXPECT_EQ(value.globalSequenceNumber, domain::CommandSequence{static_cast<uint64_t>(i)});
     }
 }
 
@@ -109,14 +109,14 @@ TEST(BusTest, MultipleReaders) {
     for (int i = 0; i < 3; ++i) {
         sequencer::sequenceMessage value{};
         EXPECT_TRUE(bus.read(cursor1, value));
-        EXPECT_EQ(value.id, static_cast<uint64_t>(i));
+        EXPECT_EQ(value.globalSequenceNumber, domain::CommandSequence{static_cast<uint64_t>(i)});
     }
 
     // Reader 2 reads all 5 values
     for (int i = 0; i < 5; ++i) {
         sequencer::sequenceMessage value{};
         EXPECT_TRUE(bus.read(cursor2, value));
-        EXPECT_EQ(value.id, static_cast<uint64_t>(i));
+        EXPECT_EQ(value.globalSequenceNumber, domain::CommandSequence{static_cast<uint64_t>(i)});
     }
 
     // Cursors should be at different positions
@@ -166,7 +166,7 @@ TEST(BusTest, ComplexDataType) {
     bus.registerCursor(cursor);
 
     sequencer::sequenceMessage m{};
-    m.id = 12345;
+    m.globalSequenceNumber = domain::CommandSequence{12345};
     m.price = domain::Price{999};
     strcpy(m.symbol, "hello");
 
@@ -174,7 +174,7 @@ TEST(BusTest, ComplexDataType) {
 
     sequencer::sequenceMessage read_msg{};
     EXPECT_TRUE(bus.read(cursor, read_msg));
-    EXPECT_EQ(read_msg.id, 12345u);
+    EXPECT_EQ(read_msg.globalSequenceNumber, domain::CommandSequence{12345});
     EXPECT_EQ(read_msg.price.value(), 999u);
     EXPECT_STREQ(read_msg.symbol, "hello");
 }
@@ -205,7 +205,7 @@ TEST(BusTest, StaleCursorRejection) {
     // Verify that slow_cursor can still read what's in the buffer
     sequencer::sequenceMessage value{};
     EXPECT_TRUE(bus.read(slow_cursor, value));
-    EXPECT_EQ(value.id, 0u);
+    EXPECT_EQ(value.globalSequenceNumber, domain::CommandSequence{});
 }
 
 // Test concurrent write and read
@@ -266,13 +266,13 @@ TEST(BusTest, MoveSemantics) {
     bus.registerCursor(cursor);
 
     sequencer::sequenceMessage m{};
-    m.id = 7;
+    m.globalSequenceNumber = domain::CommandSequence{7};
     strcpy(m.symbol, "AAPL");
     EXPECT_TRUE(bus.write(std::move(m)));
 
     sequencer::sequenceMessage read_msg{};
     EXPECT_TRUE(bus.read(cursor, read_msg));
-    EXPECT_EQ(read_msg.id, 7u);
+    EXPECT_EQ(read_msg.globalSequenceNumber, domain::CommandSequence{7});
     EXPECT_STREQ(read_msg.symbol, "AAPL");
 }
 
@@ -294,7 +294,7 @@ TEST(BusTest, generalTest) {
     check = bus.read(cursor1, buf);
     EXPECT_FALSE(check);
 
-    // ids 0..9 stand in for "msg0".."msg9"
+    // Command sequences 0..9 stand in for "msg0".."msg9".
     for (int i = 0; i < 10; ++i) {
         check = bus.write(msg(i));
         EXPECT_TRUE(check);
@@ -304,30 +304,30 @@ TEST(BusTest, generalTest) {
     EXPECT_FALSE(check);
 
     bus.read(cursor1, buf);
-    EXPECT_EQ(buf.id, 0u);
+    EXPECT_EQ(buf.globalSequenceNumber, domain::CommandSequence{});
     bus.read(cursor2, buf);
-    EXPECT_EQ(buf.id, 0u);
+    EXPECT_EQ(buf.globalSequenceNumber, domain::CommandSequence{});
     bus.read(cursor3, buf);
-    EXPECT_EQ(buf.id, 0u);
+    EXPECT_EQ(buf.globalSequenceNumber, domain::CommandSequence{});
 
     check = bus.write(msg(10)); // "wrap0"
     EXPECT_TRUE(check);
 
     for (int i = 0; i < 9; ++i) {
         bus.read(cursor1, buf);
-        EXPECT_EQ(buf.id, static_cast<uint64_t>(i + 1));
+        EXPECT_EQ(buf.globalSequenceNumber, domain::CommandSequence{static_cast<uint64_t>(i + 1)});
         bus.read(cursor2, buf);
-        EXPECT_EQ(buf.id, static_cast<uint64_t>(i + 1));
+        EXPECT_EQ(buf.globalSequenceNumber, domain::CommandSequence{static_cast<uint64_t>(i + 1)});
         bus.read(cursor3, buf);
-        EXPECT_EQ(buf.id, static_cast<uint64_t>(i + 1));
+        EXPECT_EQ(buf.globalSequenceNumber, domain::CommandSequence{static_cast<uint64_t>(i + 1)});
     }
 
     check = bus.write(msg(11)); // "wrap1"
     EXPECT_TRUE(check);
     bus.read(cursor2, buf);
-    EXPECT_EQ(buf.id, 10u); // "wrap0"
+    EXPECT_EQ(buf.globalSequenceNumber, domain::CommandSequence{10}); // "wrap0"
     bus.read(cursor3, buf);
-    EXPECT_EQ(buf.id, 10u);
+    EXPECT_EQ(buf.globalSequenceNumber, domain::CommandSequence{10});
 
     for (int i = 0; i < 8; i++) {
         check = bus.write(msg(12 + i)); // "wrap2".."wrap9"

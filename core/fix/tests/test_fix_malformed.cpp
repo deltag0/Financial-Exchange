@@ -44,6 +44,7 @@ TEST(FixMalformed, FixTaskFromAppHandlesMalformed) {
     sequenceMessage out{};
     EXPECT_FALSE(fix_task.processNextStagedCommand());
     EXPECT_FALSE(q.pop(out));
+    EXPECT_EQ(fix_task.statistics().normalizationRejections, 1u);
 }
 
 TEST(FixMalformed, UnknownOverlongSymbolIsRejected) {

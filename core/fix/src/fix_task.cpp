@@ -4,25 +4,6 @@
 #include <iostream>
 
 namespace exchange::core::task {
-namespace {
-
-const char *admissionStatusName(const admission::AdmissionStatus status) {
-    switch (status) {
-        case admission::AdmissionStatus::FIRST_SUBMISSION:
-            return "FirstSubmission";
-        case admission::AdmissionStatus::IDENTICAL_IN_FLIGHT:
-            return "IdenticalInFlight";
-        case admission::AdmissionStatus::IDENTICAL_COMPLETED:
-            return "IdenticalCompleted";
-        case admission::AdmissionStatus::CONFLICTING_REUSE:
-            return "DuplicateCommandConflict";
-        case admission::AdmissionStatus::ADMISSION_UNAVAILABLE:
-            return "AdmissionUnavailable";
-    }
-    return "UnknownAdmissionStatus";
-}
-
-} // namespace
 
 void FixTask::onCreate(const FIX::SessionID &sessionID) {
     std::cout << "[FixTask] Session created: " << sessionID << std::endl;
@@ -38,15 +19,12 @@ void FixTask::onLogout(const FIX::SessionID &sessionID) {
 
 void FixTask::toAdmin(FIX::Message &, const FIX::SessionID &) {}
 
-void FixTask::toApp(FIX::Message &message, const FIX::SessionID &) noexcept {
-    std::cout << "[FixTask] -> Sending App Data: " << message.toString() << std::endl;
-}
+void FixTask::toApp(FIX::Message &, const FIX::SessionID &) noexcept {}
 
-void FixTask::fromAdmin(const FIX::Message &message, const FIX::SessionID &) noexcept {
-    std::cout << "[FixTask] <- Received Admin (Raw): " << message.toString().substr(0, 30) << "..." << std::endl;
-}
+void FixTask::fromAdmin(const FIX::Message &, const FIX::SessionID &) noexcept {}
 
 void FixTask::fromApp(const FIX::Message &message, const FIX::SessionID &sessionID) noexcept {
+    std::optional<sequencer::sequenceMessage> normalized;
     try {
         FIX::MsgType msgType;
         message.getHeader().getField(msgType);
@@ -55,23 +33,43 @@ void FixTask::fromApp(const FIX::Message &message, const FIX::SessionID &session
             return;
         }
 
-        sequencer::sequenceMessage normalized = fix::parseFixMessage(message, sessionID, clientIdentityResolver);
-        const admission::AdmissionDecision decision = commandAdmissionIndex.reserve(normalized);
+        normalized.emplace(fix::parseFixMessage(message, sessionID, clientIdentityResolver));
+    } catch (const FIX::FieldNotFound &) {
+        normalizationRejections_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    } catch (const fix::FixValidationError &) {
+        normalizationRejections_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    } catch (const std::exception &exception) {
+        internalFailures_.fetch_add(1, std::memory_order_relaxed);
+        std::cerr << "[FixTask] Internal normalization failure: " << exception.what() << '\n';
+        return;
+    } catch (...) {
+        internalFailures_.fetch_add(1, std::memory_order_relaxed);
+        std::cerr << "[FixTask] Internal normalization failure: unknown exception\n";
+        return;
+    }
+
+    try {
+        const admission::AdmissionDecision decision = commandAdmissionIndex.reserve(*normalized);
         if (decision.status != admission::AdmissionStatus::FIRST_SUBMISSION) {
-            std::cerr << "[FixTask] Command admission outcome: " << admissionStatusName(decision.status) << std::endl;
             return;
         }
 
-        if (!stagingQueue_.push(normalized)) {
-            const bool abandoned = commandAdmissionIndex.abandonReservation(normalized);
-            std::cerr << "[FixTask] Staging queue is full; reservation "
-                      << (abandoned ? "abandoned" : "could not be abandoned") << std::endl;
+        if (!stagingQueue_.push(*normalized)) {
+            stagingQueueSaturations_.fetch_add(1, std::memory_order_relaxed);
+            const bool abandoned = commandAdmissionIndex.abandonReservation(*normalized);
+            if (!abandoned) {
+                reservationAbandonFailures_.fetch_add(1, std::memory_order_relaxed);
+                std::cerr << "[FixTask] Invariant failure: staging-full reservation could not be abandoned\n";
+            }
         }
-
-    } catch (const FIX::FieldNotFound &e) {
-        std::cerr << "[FixTask] Required field missing: " << e.field << std::endl;
-    } catch (const std::exception &e) {
-        std::cerr << "[FixTask] Error: " << e.what() << std::endl;
+    } catch (const std::exception &exception) {
+        internalFailures_.fetch_add(1, std::memory_order_relaxed);
+        std::cerr << "[FixTask] Internal admission/staging failure: " << exception.what() << '\n';
+    } catch (...) {
+        internalFailures_.fetch_add(1, std::memory_order_relaxed);
+        std::cerr << "[FixTask] Internal admission/staging failure: unknown exception\n";
     }
 }
 
