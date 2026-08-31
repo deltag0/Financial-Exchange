@@ -7,7 +7,9 @@
 #include "fix_parser.hpp"
 
 // Pre-include STL headers so the throw(...) macro hack doesn't break them
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <optional>
 
@@ -30,6 +32,15 @@
 #define INT_BURST_MESSAGES 32
 
 namespace exchange::core::task {
+
+struct FixTaskStatistics final {
+    std::uint64_t normalizationRejections{};
+    std::uint64_t internalFailures{};
+    std::uint64_t stagingQueueSaturations{};
+    std::uint64_t reservationAbandonFailures{};
+
+    bool operator==(const FixTaskStatistics &) const = default;
+};
 
 class FixTask : public FIX::Application, public Task<sequencer::sequenceMessage> {
 public:
@@ -55,6 +66,14 @@ public:
     [[nodiscard]] const std::optional<sequencer::sequenceMessage> &pendingStagedCommand() const noexcept {
         return pendingStagedCommand_;
     }
+    [[nodiscard]] FixTaskStatistics statistics() const noexcept {
+        return FixTaskStatistics{
+            .normalizationRejections = normalizationRejections_.load(std::memory_order_relaxed),
+            .internalFailures = internalFailures_.load(std::memory_order_relaxed),
+            .stagingQueueSaturations = stagingQueueSaturations_.load(std::memory_order_relaxed),
+            .reservationAbandonFailures = reservationAbandonFailures_.load(std::memory_order_relaxed),
+        };
+    }
 
     void onCreate(const FIX::SessionID &sessionID) override;
     void onLogon(const FIX::SessionID &sessionID) override;
@@ -78,6 +97,10 @@ private:
     // The exchange composition root owns both shared services and outlives FixTask.
     const fix::ClientIdentityResolver &clientIdentityResolver;
     admission::CommandAdmissionIndex &commandAdmissionIndex;
+    std::atomic<std::uint64_t> normalizationRejections_{0};
+    std::atomic<std::uint64_t> internalFailures_{0};
+    std::atomic<std::uint64_t> stagingQueueSaturations_{0};
+    std::atomic<std::uint64_t> reservationAbandonFailures_{0};
     std::atomic<Bus::cursor_type> cursor{0};
 };
 

@@ -83,16 +83,16 @@ TEST(FixClientIdentityTest, NewOrderAndCancelUseConfiguredIdentity) {
     EXPECT_EQ(cancel.targetOrderId, std::optional<domain::TargetOrderId>{domain::TargetOrderId{99}});
 }
 
-TEST(FixClientIdentityTest, UnknownExactIdentityIsRejectedWithoutConsumingParserOrder) {
-    const auto before = parseFixMessage(makeNewOrder("BEFORE"), PRIMARY_SESSION, identityResolver());
-
+TEST(FixClientIdentityTest, UnknownExactIdentityIsRejectedWithoutACommand) {
     EXPECT_THROW(parseFixMessage(makeNewOrder("UNKNOWN"), UNKNOWN_SESSION, identityResolver()), FixValidationError);
     const FIX::SessionID unconfiguredQualifier("FIX.4.2", "EXCHANGE", "CLIENT-A", "QUALIFIER");
     EXPECT_THROW(parseFixMessage(makeNewOrder("QUALIFIED"), unconfiguredQualifier, identityResolver()),
                  FixValidationError);
 
-    const auto after = parseFixMessage(makeNewOrder("AFTER"), PRIMARY_SESSION, identityResolver());
-    EXPECT_EQ(after.order, before.order + 1);
+    const auto valid = parseFixMessage(makeNewOrder("AFTER"), PRIMARY_SESSION, identityResolver());
+    EXPECT_EQ(valid.clientId, domain::ClientId{7001});
+    ASSERT_TRUE(valid.clientCommandId.has_value());
+    EXPECT_EQ(valid.clientCommandId->value(), "AFTER");
 }
 
 TEST(FixTaskClientIdentityTest, UnknownIdentityNeverEntersSequencingIngress) {
@@ -106,6 +106,7 @@ TEST(FixTaskClientIdentityTest, UnknownIdentityNeverEntersSequencingIngress) {
     sequencer::sequenceMessage output{};
     EXPECT_FALSE(fixTask.processNextStagedCommand());
     EXPECT_FALSE(sequencingIngressQueue.pop(output));
+    EXPECT_EQ(fixTask.statistics().normalizationRejections, 1u);
 }
 
 TEST(FixClientIdentityConfigurationTest, RepositorySessionHasStableConfiguredClientId) {

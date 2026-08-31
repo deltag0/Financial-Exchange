@@ -8,8 +8,9 @@
 namespace {
 
 constexpr std::size_t COMMAND_COUNT = 100;
+constexpr auto PROGRESS_DEADLINE = std::chrono::seconds(2);
 
-[[noreturn]] void exitBenchmark(const int status) {
+[[noreturn]] void exitSmokeTest(const int status) {
     std::cout.flush();
     std::cerr.flush();
     std::_Exit(status);
@@ -25,34 +26,33 @@ int main() {
 
     for (std::size_t index = 0; index < COMMAND_COUNT; ++index) {
         exchange::sequencer::sequenceMessage command{};
-        command.id = index + 1;
+        command.configurationVersion = index + 1;
         command.type = exchange::sequencer::orderType::BUY;
         if (!ingress.push(command)) {
-            std::cerr << "benchmark ingress unexpectedly full\n";
-            exitBenchmark(EXIT_FAILURE);
+            std::cerr << "production-loop smoke ingress unexpectedly full\n";
+            exitSmokeTest(EXIT_FAILURE);
         }
     }
 
-    const auto start = std::chrono::steady_clock::now();
     std::thread productionLoop([&sequencer]() { sequencer.run(); });
     productionLoop.detach();
 
+    const auto deadline = std::chrono::steady_clock::now() + PROGRESS_DEADLINE;
     for (std::size_t index = 0; index < COMMAND_COUNT; ++index) {
         exchange::sequencer::sequenceMessage command{};
         while (!matching.pop(command)) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                std::cerr << "production-loop smoke exceeded FIFO progress deadline\n";
+                exitSmokeTest(EXIT_FAILURE);
+            }
             std::this_thread::yield();
         }
-        if (command.globalSequenceNumber.value() != index + 1) {
-            std::cerr << "benchmark observed non-FIFO command sequence\n";
-            exitBenchmark(EXIT_FAILURE);
+        if (command.configurationVersion != index + 1 || command.globalSequenceNumber.value() != index + 1) {
+            std::cerr << "production-loop smoke observed non-FIFO sequencing\n";
+            exitSmokeTest(EXIT_FAILURE);
         }
     }
 
-    const auto elapsed = std::chrono::steady_clock::now() - start;
-    const auto elapsedMicroseconds = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
-    const double commandsPerSecond =
-        static_cast<double>(COMMAND_COUNT) * 1'000'000.0 / static_cast<double>(elapsedMicroseconds);
-    std::cout << "commands=" << COMMAND_COUNT << " elapsed_us=" << elapsedMicroseconds
-              << " commands_per_second=" << commandsPerSecond << '\n';
-    exitBenchmark(EXIT_SUCCESS);
+    std::cout << "validated_commands=" << COMMAND_COUNT << '\n';
+    exitSmokeTest(EXIT_SUCCESS);
 }

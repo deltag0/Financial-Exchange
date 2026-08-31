@@ -98,10 +98,8 @@ TEST(FixParserCancelNormalizationTest, RejectsMissingEmptySignedWhitespaceAndNon
     }
 }
 
-TEST(FixParserCancelNormalizationTest, RejectsZeroAndUint64OverflowWithoutConsumingParserOrder) {
+TEST(FixParserCancelNormalizationTest, RejectsZeroAndUint64Overflow) {
     const FIX::SessionID session("FIX.4.4", "S", "T");
-    const auto before = exchange::core::fix::parseFixMessage(makeValidCancel("1", "BEFORE"), session,
-                                                             exchange::core::fix::test::clientIdentityResolver());
 
     EXPECT_THROW(exchange::core::fix::parseFixMessage(makeValidCancel("0", "ZERO"), session,
                                                       exchange::core::fix::test::clientIdentityResolver()),
@@ -109,10 +107,6 @@ TEST(FixParserCancelNormalizationTest, RejectsZeroAndUint64OverflowWithoutConsum
     EXPECT_THROW(exchange::core::fix::parseFixMessage(makeValidCancel("18446744073709551616", "OVERFLOW"), session,
                                                       exchange::core::fix::test::clientIdentityResolver()),
                  exchange::core::fix::FixValidationError);
-
-    const auto after = exchange::core::fix::parseFixMessage(makeValidCancel("2", "AFTER"), session,
-                                                            exchange::core::fix::test::clientIdentityResolver());
-    EXPECT_EQ(after.order, before.order + 1);
 }
 
 TEST(FixParserCancelNormalizationTest, RejectsUnknownInstrumentAndMissingRequiredCommandFields) {
@@ -137,13 +131,13 @@ TEST(FixParserCancelNormalizationTest, RejectsUnknownInstrumentAndMissingRequire
     emptyClientCommand.setField(FIX::ClOrdID(""));
     EXPECT_THROW(exchange::core::fix::parseFixMessage(emptyClientCommand, session,
                                                       exchange::core::fix::test::clientIdentityResolver()),
-                 std::invalid_argument);
+                 exchange::core::fix::FixValidationError);
 
     FIX::Message overflowingClientCommand = makeValidCancel();
     overflowingClientCommand.setField(FIX::ClOrdID(std::string(65, 'C')));
     EXPECT_THROW(exchange::core::fix::parseFixMessage(overflowingClientCommand, session,
                                                       exchange::core::fix::test::clientIdentityResolver()),
-                 std::invalid_argument);
+                 exchange::core::fix::FixValidationError);
 }
 
 TEST(FixParserEdgeCases, MissingSymbolQtyPriceClOrdIDTIF) {
@@ -183,7 +177,7 @@ TEST(FixParserEdgeCases, MissingTimeInForceIsRejectedIndependently) {
         FIX::FieldNotFound);
 }
 
-TEST(FixParserEdgeCases, ConfiguredMaximumValuesAndOrderCounter) {
+TEST(FixParserEdgeCases, ConfiguredMaximumValuesNormalizeDeterministically) {
     FIX::Message msg1;
     msg1.getHeader().setField(FIX::MsgType("D"));
     msg1.setField(FIX::ClOrdID("L1"));
@@ -200,10 +194,12 @@ TEST(FixParserEdgeCases, ConfiguredMaximumValuesAndOrderCounter) {
     FIX::Message msg2 = msg1;
     auto seq2 = exchange::core::fix::parseFixMessage(msg2, sid, exchange::core::fix::test::clientIdentityResolver());
 
-    EXPECT_GT(seq1.order, 0u);
-    EXPECT_EQ(seq2.order, seq1.order + 1);
     EXPECT_EQ(seq1.quantity.value(), 100000000u);
     EXPECT_EQ(seq1.price.value(), 10000000000u);
+    EXPECT_EQ(seq2.quantity, seq1.quantity);
+    EXPECT_EQ(seq2.price, seq1.price);
+    EXPECT_EQ(seq2.clientId, seq1.clientId);
+    EXPECT_EQ(seq2.clientCommandId, seq1.clientCommandId);
 }
 
 TEST(FixParserEdgeCases, HeaderMissingThrows) {
@@ -247,6 +243,7 @@ TEST(FixTaskEdgeCases, FromAppHandlesMissingHeader) {
     sequenceMessage out{};
     EXPECT_FALSE(fix_task.processNextStagedCommand());
     EXPECT_FALSE(seq_q.pop(out));
+    EXPECT_EQ(fix_task.statistics().normalizationRejections, 1u);
 }
 
 TEST(FixTaskCancelNormalizationTest, ValidCancelEntersSequencingIngressWithExactTarget) {
@@ -286,12 +283,11 @@ TEST(FixTaskCancelNormalizationTest, InvalidCancelNeverEntersSequencingIngress) 
         EXPECT_FALSE(fix_task.processNextStagedCommand()) << "OrderID=" << orderId;
         EXPECT_FALSE(seq_q.pop(output)) << "OrderID=" << orderId;
     }
+    EXPECT_EQ(fix_task.statistics().normalizationRejections, 6u);
 }
 
 TEST(FixParserValidation, RejectsEveryUnsupportedTimeInForce) {
     const FIX::SessionID session("FIX.4.4", "S", "T");
-    const auto before = exchange::core::fix::parseFixMessage(makeValidOrder(), session,
-                                                             exchange::core::fix::test::clientIdentityResolver());
     for (const char timeInForce : {FIX::TimeInForce_DAY, FIX::TimeInForce_FILL_OR_KILL, FIX::TimeInForce_GOOD_TILL_DATE,
                                    FIX::TimeInForce_GOOD_TILL_CROSSING, FIX::TimeInForce_AT_THE_CLOSE, 'Z'}) {
         const FIX::Message message = makeValidOrder(timeInForce);
@@ -310,7 +306,7 @@ TEST(FixParserValidation, RejectsEveryUnsupportedTimeInForce) {
     const auto after =
         exchange::core::fix::parseFixMessage(makeValidOrder(FIX::TimeInForce_IMMEDIATE_OR_CANCEL), session,
                                              exchange::core::fix::test::clientIdentityResolver());
-    EXPECT_EQ(after.order, before.order + 1);
+    EXPECT_EQ(after.tif, exchange::core::task::TimeInForce::IOC);
 }
 
 TEST(FixParserValidation, GtcAndIocRejectExpireTime) {

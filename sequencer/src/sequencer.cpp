@@ -73,9 +73,6 @@ bool exchange::sequencer::Sequencer::processNext() {
     if (message.type == orderType::BUY || message.type == orderType::SELL) {
         message.orderId = domain::orderIdFrom(message.globalSequenceNumber);
     }
-    // Retained in the wire layout for compatibility; no authoritative consumer exists.
-    message.topicSequenceNumber = 0;
-
     if (admissionIndex_ != nullptr) {
         const core::admission::MarkSequencedStatus status = admissionIndex_->markSequenced(message);
         if (status != core::admission::MarkSequencedStatus::SEQUENCED) {

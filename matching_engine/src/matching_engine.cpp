@@ -81,7 +81,7 @@ void MatchingEngine::run() {
 
 void MatchingEngine::send(sequencer::sequenceMessage& message) {
     if (!multicastBus.write(message)) {
-        std::cerr << "[MatchingEngine] Failed to write message ID " << message.id << " to multicast bus" << std::endl;
+        multicastWriteFailures_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 

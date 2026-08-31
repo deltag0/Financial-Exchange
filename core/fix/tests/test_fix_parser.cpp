@@ -54,7 +54,6 @@ TEST(FixParserTest, ParseNewOrderSingle) {
     ASSERT_TRUE(seq.clientCommandId.has_value());
     EXPECT_EQ(seq.clientCommandId->value(), "ABC123");
     EXPECT_EQ(seq.shard_id, 0);
-    EXPECT_NE(seq.id, 0);
 }
 
 TEST(FixParserTest, SpyV1AcceptsExactNumericBoundariesAndEquivalentDecimals) {

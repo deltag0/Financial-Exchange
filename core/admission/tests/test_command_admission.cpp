@@ -111,7 +111,6 @@ TEST(CommandAdmissionIndexTest, CompletedRetransmissionReturnsExactOriginalImmut
     ASSERT_EQ(index.complete(original), CompletionStatus::COMPLETED);
 
     sequencer::sequenceMessage retransmission = command;
-    retransmission.timestamp = 999;
     retransmission.globalSequenceNumber = domain::CommandSequence{123};
     const AdmissionDecision decision = index.reserve(retransmission);
 
@@ -172,19 +171,13 @@ TEST(CommandAdmissionIndexTest, DifferentClientsMayReuseSameClientCommandId) {
     EXPECT_EQ(index.size(), 2u);
 }
 
-TEST(CommandAdmissionIndexTest, GeneratedAndLegacyTransportFieldsDoNotAffectEquality) {
+TEST(CommandAdmissionIndexTest, GeneratedAndPartitionMetadataDoNotAffectEquality) {
     CommandAdmissionIndex index(8);
     const sequencer::sequenceMessage original = makeNewOrder();
     ASSERT_EQ(index.reserve(original).status, AdmissionStatus::FIRST_SUBMISSION);
 
     sequencer::sequenceMessage retransmission = original;
-    retransmission.id = 999;
-    retransmission.port = 888;
-    retransmission.topic = 777;
-    retransmission.topicSequenceNumber = 666;
     retransmission.shard_id = 3;
-    retransmission.order = 555;
-    retransmission.timestamp = 444;
     retransmission.globalSequenceNumber = domain::CommandSequence{333};
     retransmission.orderId = domain::OrderId{333};
     std::strcpy(retransmission.symbol, "ALT");
