@@ -58,6 +58,7 @@ docker-compose down
 
 ## Documentation
 
+- [Product Direction](docs/product-direction.md) — educational simulation vision, experience, and feature priorities
 - [Exchange Rules](docs/exchange-rules.md) — order handling and matching behavior
 - [Architecture](docs/architecture.md) — component responsibilities, ownership, and data flow
 - [Implementation Status](docs/implementation-status.md) — implementation and test coverage record
