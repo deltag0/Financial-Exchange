@@ -16,12 +16,22 @@ reproducible evidence.
 - Exchange behavior: `docs/exchange-rules.md`
 - Intended component design and ownership: `docs/architecture.md`
 - Current implementation and test coverage: `docs/implementation-status.md`
+- Intended user experience and feature priorities: `docs/product-direction.md`
+- Decision reasoning and transferable engineering lessons:
+  `docs/engineering-decisions-and-lessons.md`
 
 Follow adopted exchange rules. Never treat a recommendation or unresolved decision as adopted
 behavior.
 
 Verify current behavior using source code, tests, and `implementation-status.md`. Never infer that a
 feature exists because it appears in `architecture.md`.
+
+`docs/engineering-decisions-and-lessons.md` explains why material choices were made, what alternatives
+lost, and what the project learned. It does not override the specialized sources above. Preserve it
+as engineering memory rather than duplicating current implementation status.
+
+`docs/product-direction.md` guides product experience and prioritization. It does not adopt exchange
+behavior, prove implementation, or override exchange rules and architecture.
 
 ## Required working practices
 
@@ -47,10 +57,17 @@ feature exists because it appears in `architecture.md`.
 | Add or change exchange behavior | Update `docs/exchange-rules.md`, tests, and implementation status where applicable |
 | Change component responsibilities, ownership, or data flow | Update `docs/architecture.md` |
 | Change current completeness, limitations, or verified test coverage | Update `docs/implementation-status.md` |
+| Change intended user experience, visual direction, product scope, or feature priorities | Update `docs/product-direction.md` and the governing rule or architecture document when applicable |
+| Make or revise a material business, architecture, reliability, performance, or non-obvious code decision | Update `docs/engineering-decisions-and-lessons.md` with motivation, alternatives, accepted tradeoffs, lessons, and evidence-based revisit conditions; update the governing source above when applicable |
 | Change only internal implementation without affecting behavior, architecture, or documented status | No documentation update is normally required |
 | Improve performance without changing those areas | Record profiling and benchmark evidence in the pull request or development report; do not create a permanent performance document |
 
 Do not duplicate current implementation descriptions outside `docs/implementation-status.md`.
+Do not add routine refactors, task histories, or test-run transcripts to
+`docs/engineering-decisions-and-lessons.md`. When a recorded decision changes, mark the earlier entry
+superseded and link its replacement instead of silently rewriting the historical rationale. Add a
+lesson when work reveals a reusable systems, correctness, low-level, latency, performance, testing,
+or operational principle that would help the project owners become better engineers.
 
 ## Repository guidance
 
