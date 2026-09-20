@@ -527,6 +527,86 @@ A useful new decision entry contains:
 - **Authority:** [Exchange Rules: Command identity and result retention](exchange-rules.md#command-identity-and-result-retention)
   and [Architecture: Command admission and retransmission](architecture.md#command-admission-and-retransmission).
 
+### D-028 — Keep matching state with the run owner and let the worker borrow it
+
+- **Status:** Adopted component ownership design. Supersedes the earlier matching-worker ownership
+  description in Architecture; no earlier numbered decision adopted that transfer. D-007's single
+  logical writer and D-015's immutable result-batch ownership remain unchanged.
+- **Decision:** The run owner retains `MatchingState`; `MatchingEngine` borrows one non-null reference.
+  The owner constructs state first and preserves its address and lifetime through worker destruction
+  and the end of every worker invocation. Only the worker mutates it while live processing is active.
+- **Why:** Books belong to the bounded exchange run and must survive worker lifetimes. Borrowing lets
+  a worker use the exact recovered state without transferring ownership, copying books, rebuilding
+  state, or replaying commands a second time. It also preserves the controller's private run bundle
+  for later installation work.
+- **Rejected alternatives:** Transfer `unique_ptr` into the worker, which splits run ownership;
+  shared ownership, which obscures destruction responsibility without coordinating mutation; owning
+  and borrowing overloads or wrappers, which add modes without a second required lifetime model;
+  public mutable controller getters, which weaken lifecycle encapsulation.
+- **Tradeoffs:** A reference expresses required presence but cannot enforce lifetime or quiescence.
+  The caller must end worker access before inspecting, replacing, or destroying state. Pending result
+  retry remains worker-owned and needs its own drain protocol before a future replacement. Borrowing
+  alone neither installs controller-backed workers nor provides pause/drain or coordinated shutdown.
+- **Lesson:** Object ownership and exclusive mutation are distinct responsibilities. A run can own
+  books while a scoped worker is their sole live writer, provided the lifetime boundary is explicit.
+- **Revisit when:** Controller-backed installation reveals a concrete need for rebinding or worker
+  replacement after proven quiescence, or instrument partitioning changes the state domain. Preserve
+  one mutator per book and evidence that recovered state survives worker destruction.
+- **Authority:** [Architecture: Matching engine and order books](architecture.md#matching-engine-and-order-books),
+  [Exchange Rules](exchange-rules.md); deterministic recovered-state worker coverage belongs in
+  [Implementation Status](implementation-status.md).
+
+### D-029 — Compose one private driven path and latch append failure before matching
+
+- **Status:** Component ownership and reliability design; the ordered pause extension is D-030.
+  D-014, D-021, and D-028 remain applicable.
+- **Decision:** The controller owns one concrete, single-threaded component chain borrowing its run
+  owners. Atomic staging is the Sequencer ingress. Each cycle checks append evidence before invoking
+  matching or completion, and a non-committed append closes admission and latches unavailability.
+- **Why:** One stable run owner avoids transferring reconstructed books or exposing mutable lifecycle
+  state. Direct staging removes a redundant handoff. A phase boundary makes failed durability
+  observable before any downstream mutation in that cycle, including earlier queued committed work.
+- **Alternatives:** External composition through mutable controller getters weakens encapsulation;
+  moving run owners splits their lifetime; another staging queue adds an unneeded pending owner;
+  automatically retrying failed writes can hide durable uncertainty. Background workers would need
+  lifecycle coordination beyond deterministic installation.
+- **Tradeoffs:** Earlier committed commands may remain queued after a later append failure; explicit
+  recovery must settle that journal before processing resumes. The runtime latch is conservative,
+  including capacity/representation failures, and is not durable catalog publication of FailStopped
+  or CapacityReached. One driver owns advancement and inspection; destruction is not a drain protocol.
+- **Revisit when:** Executable installation, catalog failure transitions, or coordinated pause/drain
+  require a concrete synchronization and recovery contract. Preserve exact failure evidence, FIFO,
+  one mutator per book, and controller ownership across installation.
+- **Authority:** [Architecture: Exchange-run controller](architecture.md#exchange-run-controller),
+  [Exchange Rules: Command sequencing and processing](exchange-rules.md#command-sequencing-and-processing).
+
+### D-030 — Make pause a closed-gate drain followed by durable catalog publication
+
+- **Status:** Adopted for the isolated, single-threaded controller-backed path. D-029 remains the
+  underlying command-processing design.
+- **Decision:** An installed Ready path closes run-bound admission before driving its existing
+  Sequencer, MatchingEngine, and completion consumer to an empty state, including pending handoffs.
+  The controller reports Paused only after the bound catalog commits Paused. Any processing stall,
+  failure, or catalog refusal leaves the gate closed and runtime unavailable with owned work and
+  exact evidence retained. Explicit resume reopens only after durable Open publication.
+- **Why:** The admission mutex gives a definite last accepted reservation, while one driver can
+  settle that finite FIFO without worker coordination. Publishing before the drain would falsely
+  certify unfinished commands; reopening after uncertain publication would split runtime and
+  catalog authority.
+- **Alternatives:** Gate closure alone cannot certify completion; publishing Paused before draining
+  leaves pending commands behind; automatic retry after uncertain append or catalog replacement
+  could duplicate effects or report an unproved lifecycle state. A new worker interface or queue
+  would add ownership without improving this deterministic barrier.
+- **Tradeoffs:** The single driver must remain exclusive during pause. A failure conservatively
+  latches runtime unavailable, even when catalog replacement has a definite refusal or an uncertain
+  replacement is observed as Paused. In-place failed-path recovery and durable FailStopped
+  publication remain separate work.
+- **Revisit when:** Background workers, executable admission wiring, or coordinated shutdown need
+  a synchronization protocol; retain the closed-gate ordering, FIFO ownership, and exact failure
+  evidence established by deterministic tests.
+- **Authority:** [Exchange Rules: Product scope and exchange runs](exchange-rules.md#product-scope-and-exchange-runs),
+  [Architecture: Exchange-run controller](architecture.md#exchange-run-controller).
+
 ## Part II — Superseded designs and what they taught us
 
 ### S-001 — Per-topic and per-shard sequencers

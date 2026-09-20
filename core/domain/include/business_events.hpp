@@ -19,6 +19,8 @@ enum class CommandType : std::uint8_t {
 
 enum class AdmissionRejectionReason : std::uint8_t {
     DUPLICATE_COMMAND_CONFLICT = 1,
+    EXCHANGE_RUN_UNAVAILABLE = 2,
+    GATEWAY_BUSY = 3,
 };
 
 enum class CommandRejectionReason : std::uint8_t {
@@ -35,6 +37,7 @@ enum class CancelReason : std::uint8_t {
 struct EventId final {
     const CommandSequence commandSequence;
     const EventIndex eventIndex;
+    const ExchangeRunId exchangeRunId{};
 
     bool operator==(const EventId&) const = default;
 };

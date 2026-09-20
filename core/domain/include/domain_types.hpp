@@ -31,6 +31,7 @@ private:
 };
 
 struct CommandSequenceTag;
+struct ExchangeRunIdTag;
 struct OrderIdTag;
 struct TargetOrderIdTag;
 struct ClientIdTag;
@@ -40,6 +41,7 @@ struct PriceTag;
 struct QuantityTag;
 
 using CommandSequence = StrongUnsigned<CommandSequenceTag, std::uint64_t>;
+using ExchangeRunId = StrongUnsigned<ExchangeRunIdTag, std::uint64_t>;
 using OrderId = StrongUnsigned<OrderIdTag, std::uint64_t>;
 using TargetOrderId = StrongUnsigned<TargetOrderIdTag, std::uint64_t>;
 using ClientId = StrongUnsigned<ClientIdTag, std::uint64_t>;
@@ -89,11 +91,13 @@ struct CommandResultCorrelation final {
     ClientId clientId;
     ClientCommandId clientCommandId;
     CommandSequence commandSequence;
+    ExchangeRunId exchangeRunId{};
 
     bool operator==(const CommandResultCorrelation&) const = default;
 };
 
 static_assert(std::is_trivially_copyable_v<CommandSequence>);
+static_assert(std::is_trivially_copyable_v<ExchangeRunId>);
 static_assert(std::is_trivially_copyable_v<TargetOrderId>);
 static_assert(std::is_trivially_copyable_v<ClientCommandId>);
 static_assert(!std::is_convertible_v<Price, Quantity>);

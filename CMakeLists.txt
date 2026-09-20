@@ -26,6 +26,7 @@ endif()
 add_library(core_lib
     core/admission/src/admission_completion_consumer.cpp
     core/admission/src/command_admission.cpp
+    core/admission/src/command_admission_recovery.cpp
     core/fix/src/client_identity.cpp
     core/fix/src/fix_task.cpp
     core/fix/src/fix_parser.cpp
@@ -43,7 +44,9 @@ target_link_libraries(core_lib PUBLIC Boost::headers ${QUICKFIX_LIB})
 
 # --- Subdirectories ---
 add_subdirectory(core/admission)
+add_subdirectory(core/storage)
 add_subdirectory(matching_engine)
+add_subdirectory(core/recovery)
 add_subdirectory(sequencer)
 add_subdirectory(core/fix)
 

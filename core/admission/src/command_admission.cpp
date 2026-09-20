@@ -1,8 +1,10 @@
 #include "command_admission.hpp"
 
 #include "../../../matching_engine/include/command_result_queue.hpp"
+#include "../../shared_queue/include/shared_queue.hpp"
 
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace exchange::core::admission {
@@ -20,13 +22,36 @@ domain::Side toDomainSide(const sequencer::orderType side) {
 
 } // namespace
 
-CommandAdmissionIndex::CommandAdmissionIndex(const std::size_t capacity) : capacity_(capacity) {
+CommandAdmissionIndex::CommandAdmissionIndex(const std::size_t capacity)
+    : capacity_(capacity), exchangeRunId_{}, admissionOpen_(true) {
     if (capacity == 0) {
         throw std::invalid_argument("command-admission capacity must be positive");
     }
 }
 
+CommandAdmissionIndex::CommandAdmissionIndex(const std::size_t capacity, const domain::ExchangeRunId exchangeRunId)
+    : capacity_(capacity), exchangeRunId_(exchangeRunId) {
+    if (capacity == 0) {
+        throw std::invalid_argument("command-admission capacity must be positive");
+    }
+    if (exchangeRunId.value() == 0) {
+        throw std::invalid_argument("run-bound command admission requires a nonzero ExchangeRunId");
+    }
+}
+
 AdmissionDecision CommandAdmissionIndex::reserve(const sequencer::sequenceMessage& command) {
+    return reserveImpl(command, nullptr);
+}
+
+AdmissionDecision CommandAdmissionIndex::reserveAndStage(const sequencer::sequenceMessage& command,
+                                                         core::SharedQueue<sequencer::sequenceMessage>& stagingQueue) {
+    // Fixed-size queue push does not allocate; publication must not acquire a throwing payload copy.
+    static_assert(std::is_nothrow_copy_constructible_v<sequencer::sequenceMessage>);
+    return reserveImpl(command, &stagingQueue);
+}
+
+AdmissionDecision CommandAdmissionIndex::reserveImpl(const sequencer::sequenceMessage& command,
+                                                     core::SharedQueue<sequencer::sequenceMessage>* stagingQueue) {
     const AdmissionKey key = keyFrom(command);
     const NormalizedBusinessCommand businessCommand = businessCommandFrom(command);
 
@@ -58,27 +83,47 @@ AdmissionDecision CommandAdmissionIndex::reserve(const sequencer::sequenceMessag
         };
     }
 
-    if (records_.size() >= capacity_) {
+    if (!admissionOpen_ || records_.size() >= capacity_) {
         ++statistics_.admissionUnavailable;
         return AdmissionDecision{
             .status = AdmissionStatus::ADMISSION_UNAVAILABLE,
-            .rejectionReason = std::nullopt,
+            .rejectionReason = admissionOpen_
+                                   ? std::nullopt
+                                   : std::optional{domain::AdmissionRejectionReason::EXCHANGE_RUN_UNAVAILABLE},
             .originalResult = {},
         };
     }
 
-    records_.emplace(key, Record{
-                              .command = businessCommand,
-                              .state = RecordState::RESERVED,
-                              .commandSequence = {},
-                              .result = {},
-                          });
+    // Allocate before publishing. Until mutex release, a staging refusal's rollback is invisible.
+    const auto reserved = records_
+                              .emplace(key,
+                                       Record{
+                                           .command = businessCommand,
+                                           .state = RecordState::RESERVED,
+                                           .commandSequence = {},
+                                           .result = {},
+                                       })
+                              .first;
+    if (stagingQueue != nullptr && !stagingQueue->push(command)) {
+        records_.erase(reserved);
+        ++statistics_.admissionUnavailable;
+        return AdmissionDecision{
+            .status = AdmissionStatus::ADMISSION_UNAVAILABLE,
+            .rejectionReason = domain::AdmissionRejectionReason::GATEWAY_BUSY,
+            .originalResult = {},
+        };
+    }
     ++statistics_.firstSubmissions;
     return AdmissionDecision{
         .status = AdmissionStatus::FIRST_SUBMISSION,
         .rejectionReason = std::nullopt,
         .originalResult = {},
     };
+}
+
+void CommandAdmissionIndex::setAdmissionOpen(const bool open) {
+    std::lock_guard lock(mutex_);
+    admissionOpen_ = open;
 }
 
 MarkSequencedStatus CommandAdmissionIndex::markSequenced(const sequencer::sequenceMessage& command) {
@@ -116,8 +161,11 @@ CompletionStatus CommandAdmissionIndex::complete(matching_engine::ImmutableComma
     }
     const domain::CommandResultCorrelation& correlation = result->correlation();
     if (correlation.clientId.value() == 0 || correlation.commandSequence.value() == 0 ||
-        correlation.clientCommandId.value().empty() || result->commandSequence() != correlation.commandSequence) {
+        correlation.clientCommandId.value().empty()) {
         return CompletionStatus::INVALID_BATCH;
+    }
+    if (correlation.exchangeRunId != exchangeRunId_) {
+        return CompletionStatus::CORRELATION_MISMATCH;
     }
     const AdmissionKey key = keyFrom(correlation);
 
@@ -151,20 +199,6 @@ matching_engine::ImmutableCommandResultBatch CommandAdmissionIndex::completedRes
     return existing->second.result;
 }
 
-bool CommandAdmissionIndex::abandonReservation(const sequencer::sequenceMessage& command) {
-    const AdmissionKey key = keyFrom(command);
-    const NormalizedBusinessCommand businessCommand = businessCommandFrom(command);
-
-    std::lock_guard lock(mutex_);
-    const auto existing = records_.find(key);
-    if (existing == records_.end() || existing->second.state != RecordState::RESERVED ||
-        existing->second.command != businessCommand) {
-        return false;
-    }
-    records_.erase(existing);
-    return true;
-}
-
 std::size_t CommandAdmissionIndex::size() const {
     std::lock_guard lock(mutex_);
     return records_.size();
@@ -172,6 +206,10 @@ std::size_t CommandAdmissionIndex::size() const {
 
 std::size_t CommandAdmissionIndex::capacity() const noexcept {
     return capacity_;
+}
+
+domain::ExchangeRunId CommandAdmissionIndex::exchangeRunId() const noexcept {
+    return exchangeRunId_;
 }
 
 AdmissionStatistics CommandAdmissionIndex::statistics() const {

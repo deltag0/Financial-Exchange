@@ -138,6 +138,97 @@ the recovered run paused until an explicit resume. `CapacityReached` and `Stoppe
 new business submissions. Recovery components validate and report outcomes; they do not
 independently publish lifecycle transitions.
 
+Normal existing-run startup selects only the canonical catalog's active `Open` or `Paused` run
+under exclusive catalog and journal ownership. Both startup operations refuse when the controller
+already owns a run; neither silently replaces those owners. Normal startup verifies the selected run
+ID on the descriptor being recovered before any journal repair or writer transfer. After
+reconstruction, the controller persists `Paused` before exposing read-only matching state and
+completed-result lookup; it does not
+open admission. Other dispositions require explicit operations, and `CapacityReached` is never
+downgraded by normal startup. Catalog replacement uncertainty leaves runtime state unavailable even
+if a canonical reload observes the proposed paused snapshot. Recovery failure reports
+`RecoveryFailed` and preserves evidence rather than selecting or creating another run.
+
+Explicit new-run startup refuses before reservation or journal creation if the controller already
+owns a run or the canonical catalog selects an active run. Otherwise, it composes the existing
+new-run preparation, empty-state construction, and durable activation boundaries, transferring one
+`RunStateV1` into controller ownership and reporting `Ready` only after committed `Open` activation.
+Refusal preserves existing owners and evidence; failures retain the exact underlying stage details
+and never expose the proposed run as ready. Reserved IDs and journal evidence are not rolled back
+after a later failure. This operation does not replace, stop, or resume another run.
+Invalid or unreadable preflight catalogs stop new-run startup immediately with the captured load
+result, without entering preparation or retrying that read. Missing-catalog journal-evidence checks
+remain delegated to preparation.
+
+Both startup operations resolve the catalog binding to an absolute path before their first read and
+use that same path throughout startup and later resume, so working-directory changes cannot select
+another installation. Explicit resume operates only on a controller-owned `Paused` run and that
+captured binding. It revalidates the active run ID, persisted `Paused` disposition,
+and remaining configured command/byte capacity against the same writer's immutable header and
+committed position. Exact next-frame fit remains the writer's append check. Resume neither replays
+nor reconstructs state: the journal writer, matching state, admission index, immutable completed
+results, and next sequence remain owned in place. It checked-increments catalog generation and
+persists `Open` before reporting `Ready`. Failure or uncertainty retains the owned paused state and
+read-only lookup without reopening business admission, even if reload observes `Open`; that
+observation is not proof of directory-entry durability. Other dispositions, especially
+`CapacityReached`, are not downgraded. After committed `Open` activation or resume, the controller
+opens the shared admission index before reporting `Ready`. Run-bound indexes start closed, including
+those constructed by standalone startup composition or recovery. The unqualified executable index
+remains an explicitly legacy, non-durable path that starts open without controller authority.
+
+The index serializes gate transitions and reservation decisions with its existing mutex. It checks
+existing records before gate availability, preserving identical in-flight/completed retransmissions
+and distinguishable conflicts while closed. Closing the gate preserves reservations and immutable
+completed results. Only the controller opens production run-bound admission; its explicit
+`closeAdmission` operation closes new reservations without changing catalog disposition or performing
+the adopted ordered pause/drain barrier. Deterministic worker installation is a separate composition
+boundary from the controller's explicit single-threaded pause operation.
+
+The controller may install one concrete command-processing path for its owned Ready or Paused run.
+The installation borrows the existing writer, matching state, and admission index in place, without
+moving owners, reconstructing books/results, or replaying commands. It does not open admission or
+change startup/resume state. An explicit run ID accompanies each already normalized submission and
+is checked before existing-record lookup. The shared index's `reserveAndStage` publishes directly to
+the bounded Sequencer ingress; no separate staging-to-ingress queue or gateway worker is needed for
+this single-threaded path.
+
+The controller owns ingress and matching command queues, the bounded result boundary, and a bounded
+internal bus with no delivery readers. These precede the Sequencer, MatchingEngine, and
+AdmissionCompletionConsumer in construction order; all workers are destroyed before the queues and
+controller-owned run state. Installation is one-time, and startup cannot replace an owned run.
+Submission, advancement, lifecycle calls, and inspection require one driving thread or external
+quiescence. Mutable run access remains private; this composition exposes no mutable controller
+getters and creates no background threads.
+
+One explicit advancement cycle drains sequencing until backpressure, checks its append evidence,
+drains matching until result backpressure, and completes one FIFO result through the existing
+consumer. The Sequencer's pending command and matcher's pending immutable result keep their existing
+retry-before-next-work semantics. Matching also retains a dequeued command if processing throws,
+without retrying an uncertain mutation. The workers expose narrow nonblocking advancement methods used by
+both this driver and their existing run loops. Normal gate closure prevents new submissions while
+this Ready path can still advance accepted work; closure alone does not publish `Paused`.
+
+For an installed Ready path, explicit pause closes admission first, then drives the same ordered
+component chain until ingress, matching, result queue, and every worker pending slot are empty.
+Only then does it replace the bound catalog's `Open` snapshot with a durably committed `Paused`
+snapshot and report runtime `Paused`. Completed-result lookup remains available through the closed
+index. Explicit resume durably restores `Open` before reopening the gate and uses the same run
+owners, books, results, and next sequence. The caller serializes pause, submission, advancement,
+inspection, and resume on one driving thread or under external quiescence.
+
+Any non-committed append makes the controller runtime unavailable and closes admission before
+matching or completion can run in that cycle. The exact append result and candidate stay with the
+Sequencer; earlier committed matching-queue work and later staged submissions remain owned. No
+advancement, append retry, replacement installation, or resume can clear that latch. Unexpected
+component exceptions similarly retain their exception evidence and prevent further advancement.
+Existing-command lookup still uses the retained index. Catalog publication of FailStopped or
+CapacityReached and explicit in-place recovery remain later lifecycle work; runtime unavailability
+must not be reported as a completed durable disposition transition. This composition does not wire
+the executable/FIX startup, client delivery, or coordinated shutdown. Pause drain or catalog
+publication failure leaves admission closed, owned work and nested evidence retained, and runtime
+unavailable; it never reports a successful pause, even if an uncertain catalog replacement is later
+observed as `Paused`.
+
 The catalog durably stores the last reserved run ID, the active run and its persisted disposition,
 and the retained stopped run. Catalog version 1 is one fixed 56-byte little-endian snapshot:
 
@@ -179,7 +270,7 @@ The lifecycle transition table is:
 | `Recovering` | New empty run validates and was explicitly started | `Ready` | Catalog exposes the active run before admission opens |
 | `Recovering` | Existing run validates after restart or failure | `Paused` | Rebuild books, admission, and results; external replay suppressed |
 | `Recovering` | Validation or replay fails | `RecoveryFailed` | Preserve evidence and keep admission closed |
-| `Ready` | Pause or clean shutdown requested | `Paused` | Close new admission first, then drain committed work |
+| `Ready` | Pause or clean shutdown requested | `Paused` | Close admission, drain every accepted reservation through completion, then commit the catalog |
 | `Paused` | Explicit resume | `Ready` | Revalidate active binding and capacity before admission opens |
 | `Ready` | Next unique command cannot fit a run limit | `CapacityReached` | Persist disposition before returning the capacity response |
 | `Ready`, `Paused`, or `CapacityReached` | Explicit end or replacement by a new run | `Stopped` | Drain committed work, invalidate bindings, then durably change retention |
@@ -266,6 +357,7 @@ assigned.
 
 - the authoritative `(ExchangeRunId, ClientId, ClientCommandId)` admission index;
 - atomic first-submission reservation across concurrent gateways;
+- linearized reservation and publication to the gateway's bounded staging queue;
 - comparison of retransmissions with the original normalized command;
 - coalescing or waiting while an identical original command is still in flight;
 - returning the original result for an identical completed command;
@@ -282,9 +374,21 @@ assigned.
 
 This boundary is logically shared by all gateways and must not be implemented as unrelated
 gateway-local caches. One bounded in-memory table owns reserved, sequenced, and completed command
-records for the active run. Its required maximum size is bounded by `MaxRunCommands`, and recovery
-reconstructs it and its exact original results from the run journal. A fingerprint may accelerate a
-lookup, but exact canonical comparison determines retransmission behavior.
+records for the active run. The table owns its single `ExchangeRunId` once and keys records by exact
+`(ClientId, ClientCommandId)` within that run. Its required maximum size is bounded by
+`MaxRunCommands`, and recovery reconstructs it and its exact original results from the run journal.
+A fingerprint may accelerate a lookup, but exact canonical comparison determines retransmission
+behavior.
+
+Gateway producers use one concrete admission-and-staging operation under the index's existing
+mutex. Existing-record lookup precedes gate and capacity checks and never stages retransmissions or
+conflicts. A closed gate returns `ExchangeRunUnavailable`. For an available new key, record allocation
+succeeds before the nonblocking fixed-size queue push; payload copying cannot throw. A full staging
+queue returns `GatewayBusy` and erases the unexposed reservation before mutex release, without
+incrementing accepted-first-submission statistics. Successful admission leaves one record and one
+staged command. Gate closure linearizes before or after both effects; it cannot split them. This
+mutex boundary performs no waiting for queue space, journal I/O, or matching and is not a pause/drain
+barrier.
 
 The retained stopped run never enters live admission. On its first replay or result-lookup request,
 the recovery/result service validates its journal and builds one separate immutable read-only view
@@ -329,6 +433,18 @@ The initial sequencing boundary is FIFO in the order it accepts newly admitted c
 the next candidate sequence for the journal, but that sequence becomes authoritative only after the
 complete command record is confirmed durable. A failed or uncertain append halts admission and
 requires journal recovery before another sequence is selected.
+
+The journal-backed sequencer borrows one caller-owned writer and an admission index bound to the
+same run. The writer's immutable header supplies run/rules context and its exact next sequence
+supplies the candidate; existing command codecs and writer checks govern the append. Admission is
+bound as sequenced and matching handoff is permitted only after committed synchronization. One
+pending slot retains committed work under matching-queue saturation, retrying only handoff before
+consuming another command. A non-committed append retains the candidate and exact append result,
+blocks further ingress consumption, and never retries writes automatically. Lifecycle handling must
+close admission and interpret capacity, definite failure, or uncertainty; this is not performed by
+the sequencer. Inspection of pending work and failures requires the consumer thread or external
+quiescence. An admission-binding invariant failure also retains work and cannot release it to
+matching; the production worker's existing uncaught invariant exception is fail-stop.
 
 Before the journal stage exists, one bounded composition-root-owned in-process queue may model the
 sequencing ingress. Gateway session threads first publish admitted normalized commands to a bounded
@@ -430,8 +546,21 @@ changes and business events.
 - event delivery retries after the event-stream boundary accepts a batch;
 - market-data transport.
 
-The matching engine is a deterministic state machine. Given the same instrument configuration,
-initial state, and sequenced commands, it produces the same final state and ordered business events.
+The synchronous matching state core owns the books and applies one command transition without queue,
+bus, task, or worker dependencies. The run owner retains the matching state; the live matching engine
+borrows exactly one non-null state by reference and wraps it with its command queue and
+result/publication boundaries. The caller constructs state before the worker and keeps it alive at
+its original address until the worker is destroyed and all worker invocations have ended. The worker
+is the exclusive live mutator; the owner must not concurrently inspect or mutate books, replace the
+state, or destroy it while the worker can access it. Matching retains its own pending-result retry
+state, independently of book ownership. The legacy executable's composition root owns its state;
+controller-backed deterministic workers borrow the private run state under the same lifetime
+contract. Any later replacement requires quiescence before replacing run state. No mutable controller inspection API is implied by this contract.
+Prepared-journal replay invokes the same core directly while suppressing all external publication,
+and a worker can borrow that reconstructed state without transferring ownership, rebuilding or
+copying books, or replaying commands again. Given
+the same instrument configuration, initial state, and sequenced commands, the core produces the same
+final state and ordered business events.
 
 Before mutation, it calculates the complete result size. The initial limit is 4,096 business events
 per command. A larger result becomes one `BookCapacityExceeded` rejection without mutation, using

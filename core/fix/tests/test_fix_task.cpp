@@ -98,7 +98,7 @@ TEST(FixTaskTest, FullSequencingIngressRetainsOnePendingAndForwardsExactlyOnceIn
     EXPECT_TRUE(sequencingIngressQueue.empty());
 }
 
-TEST(FixTaskTest, FullStagingQueueAbandonsReservationAndAllowsIdenticalRetry) {
+TEST(FixTaskTest, FullStagingQueueRefusesReservationAndAllowsIdenticalRetry) {
     exchange::core::SharedQueue<sequenceMessage> sequencingIngressQueue(1);
     exchange::core::Bus bus(8);
     exchange::core::admission::CommandAdmissionIndex admissionIndex(8);
@@ -109,9 +109,8 @@ TEST(FixTaskTest, FullStagingQueueAbandonsReservationAndAllowsIdenticalRetry) {
     fixTask.fromApp(makeNewOrder("FIRST"), session);
     fixTask.fromApp(makeNewOrder("RETRY"), session);
     EXPECT_EQ(admissionIndex.size(), 1u);
-    EXPECT_EQ(admissionIndex.statistics().firstSubmissions, 2u);
+    EXPECT_EQ(admissionIndex.statistics().firstSubmissions, 1u);
     EXPECT_EQ(fixTask.statistics().stagingQueueSaturations, 1u);
-    EXPECT_EQ(fixTask.statistics().reservationAbandonFailures, 0u);
 
     ASSERT_TRUE(fixTask.processNextStagedCommand());
     sequenceMessage first{};
@@ -121,7 +120,7 @@ TEST(FixTaskTest, FullStagingQueueAbandonsReservationAndAllowsIdenticalRetry) {
 
     fixTask.fromApp(makeNewOrder("RETRY"), session);
     EXPECT_EQ(admissionIndex.size(), 2u);
-    EXPECT_EQ(admissionIndex.statistics().firstSubmissions, 3u);
+    EXPECT_EQ(admissionIndex.statistics().firstSubmissions, 2u);
     ASSERT_TRUE(fixTask.processNextStagedCommand());
 
     sequenceMessage retry{};
@@ -177,7 +176,7 @@ TEST(FixTaskTest, ConcurrentNormalizationRejectionsHaveAnExactMonotonicDiagnosti
     EXPECT_TRUE(fixTask.stagingQueueEmpty());
 }
 
-TEST(FixTaskTest, ConcurrentStagingSaturationCountsEachRejectedHandoffAndAbandonsItsReservation) {
+TEST(FixTaskTest, ConcurrentStagingSaturationCountsEachRefusalWithoutAcceptingItsReservation) {
     constexpr std::size_t producerCount = 8;
     exchange::core::SharedQueue<sequenceMessage> sequencingIngressQueue(1);
     exchange::core::Bus bus(8);
@@ -203,7 +202,6 @@ TEST(FixTaskTest, ConcurrentStagingSaturationCountsEachRejectedHandoffAndAbandon
     EXPECT_EQ(statistics.normalizationRejections, 0u);
     EXPECT_EQ(statistics.internalFailures, 0u);
     EXPECT_EQ(statistics.stagingQueueSaturations, producerCount - 1);
-    EXPECT_EQ(statistics.reservationAbandonFailures, 0u);
-    EXPECT_EQ(admissionIndex.statistics().firstSubmissions, producerCount);
+    EXPECT_EQ(admissionIndex.statistics().firstSubmissions, 1u);
     EXPECT_EQ(admissionIndex.size(), 1u);
 }
