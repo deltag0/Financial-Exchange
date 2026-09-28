@@ -50,8 +50,16 @@ AdmissionDecision CommandAdmissionIndex::reserveAndStage(const sequencer::sequen
     return reserveImpl(command, &stagingQueue);
 }
 
+AdmissionDecision CommandAdmissionIndex::reserveAndStageForRunCapacity(
+    const sequencer::sequenceMessage& command, core::SharedQueue<sequencer::sequenceMessage>& stagingQueue,
+    const bool capacityAvailable) {
+    static_assert(std::is_nothrow_copy_constructible_v<sequencer::sequenceMessage>);
+    return reserveImpl(command, &stagingQueue, capacityAvailable);
+}
+
 AdmissionDecision CommandAdmissionIndex::reserveImpl(const sequencer::sequenceMessage& command,
-                                                     core::SharedQueue<sequencer::sequenceMessage>* stagingQueue) {
+                                                     core::SharedQueue<sequencer::sequenceMessage>* stagingQueue,
+                                                     const bool capacityAvailable) {
     const AdmissionKey key = keyFrom(command);
     const NormalizedBusinessCommand businessCommand = businessCommandFrom(command);
 
@@ -80,6 +88,15 @@ AdmissionDecision CommandAdmissionIndex::reserveImpl(const sequencer::sequenceMe
             .status = AdmissionStatus::IDENTICAL_COMPLETED,
             .rejectionReason = std::nullopt,
             .originalResult = existing->second.result,
+        };
+    }
+
+    if (!capacityAvailable) {
+        ++statistics_.admissionUnavailable;
+        return AdmissionDecision{
+            .status = AdmissionStatus::ADMISSION_UNAVAILABLE,
+            .rejectionReason = domain::AdmissionRejectionReason::RUN_CAPACITY_REACHED,
+            .originalResult = {},
         };
     }
 

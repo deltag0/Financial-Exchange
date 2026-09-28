@@ -407,16 +407,44 @@ A useful new decision entry contains:
 
 - **Status:** Adopted rule and intended architecture.
 - **Decision:** Matching produces complete internal events. Client delivery creates private,
-  counterparty-safe views; public trades and quotes belong to a separate publisher. Initially an
-  identical retransmission retrieves the original result.
+  counterparty-safe views; public trades and quotes belong to a separate publisher. The initial
+  transport-neutral public value is one sanitized trade per authoritative `Trade`, preserving
+  `EventId`, instrument, execution price/quantity, and aggressor side while excluding client,
+  client-command, order, remaining-quantity, correlation, and authoritative ownership. A self-trade
+  remains one public trade, and non-trade events produce no public value. Public handoff accepts one
+  command's complete ordered trade batch atomically into a queue bounded by total trade records.
+  Empty projections create no entry. On saturation, one pending batch blocks later result
+  consumption; accepted data becomes the publisher's responsibility. `EventId` stays source identity
+  rather than a promised gap-free feed sequence. Participant-private handoff likewise accepts one
+  command's complete ordered `RecipientResults` fan-out atomically, but bounds capacity by contained
+  private events and must hold checked `2 × MaxEventsPerCommand` for worst-case self-trade expansion.
+  One pending private batch blocks later authoritative results. Admission completes once, and the
+  authoritative batch remains held until its independently accepted private and public projections
+  are empty or owned by their respective delivery components. Replay suppresses unsolicited delivery.
+  Initially an identical retransmission retrieves the original private result without enqueueing a
+  second live delivery.
 - **Why:** Broadcasting one internal representation can leak counterparty information and couples the
-  matcher to FIX or market-data formats. Retransmission already has an idempotency key and avoids
-  inventing reconnect replay before delivery tracking exists.
-- **Tradeoffs:** Adapters and routing state increase. Clients initially need to retransmit after a
-  disconnect, and results cease to exist after their retained run is explicitly deleted.
+  matcher to FIX or market-data formats. Atomic per-command handoff preserves event order and makes
+  backpressure explicit without partial or duplicate publication. Independent channel acceptance
+  avoids a cross-channel atomic queue operation while the retained authoritative result prevents
+  completion from being mistaken for delivery. Retransmission already has an idempotency key and
+  avoids inventing reconnect replay before delivery tracking exists.
+- **Tradeoffs:** Adapters and routing state increase. Public capacity covers one maximum authoritative
+  trade count; private capacity covers the two-view self-trade expansion. A slow private-delivery or
+  public consumer can stall later result dispatch and lifecycle completion. Independent acceptance
+  means one delivery component may own its projection while the other remains pending. Live queues
+  are not crash-persistent; clients initially need explicit retransmission or retained lookup after a
+  disconnect. At adoption the public projection provided no transport; D-035 adds a live browser
+  stream but no quotes, feed sequence, snapshot, or gap recovery. Private results cease to exist
+  after their retained run is deleted.
 - **Rejected alternatives:** Let matching format FIX; expose authoritative `Trade` objects publicly;
-  treat multicast forwarding as proof of private delivery.
-- **Revisit when:** A reconnect replay, result-history query, or recoverable public feed is adopted.
+  enqueue individual public or private events with partial-batch success; count only recipient
+  envelopes; require one atomic transaction across private and public queues; recomplete admission or
+  reproject on retry; drop or overwrite on saturation; advertise `EventId` as a gap-free feed
+  sequence; externally republish replay; treat multicast forwarding as proof of private delivery.
+- **Revisit when:** Durable or acknowledged unsolicited delivery, reconnect replay, a result-history
+  query, public quote model, or recoverable public feed is adopted. Durable delivery across process
+  crashes would require revisiting queue ownership, persistence, and recovery.
 - **Authority:** [Exchange Rules: Event visibility and result redelivery](exchange-rules.md#event-visibility-and-result-redelivery).
 
 ### D-023 — Separate deterministic correctness tests from performance benchmarks
@@ -510,15 +538,22 @@ A useful new decision entry contains:
 
 ### D-027 — Materialize one retained stopped run as a bounded read-only view
 
-- **Status:** Intended architecture implementing adopted retained-run lookup behavior.
+- **Status:** Adopted and implemented in the isolated single-driver controller. Worst-case two-view
+  memory validation on the reference laptop remains outstanding.
 - **Decision:** Keep the live admission/result table for the active run and lazily reconstruct at most
-  one separate immutable stopped-run view from its journal. Validate capacity for both worst-case
-  views on the reference laptop.
+  one separate immutable stopped-run view from its journal. The controller validates catalog
+  selection before deriving the journal path, reuses the existing recovery/replay/admission
+  composition, closes the temporary recovered writer, and retains only matching and completed
+  admission state. A repeated lookup reuses the one optional view. Committed retention replacement
+  invalidates the older view before post-commit journal cleanup, even if that cleanup fails. Validate
+  capacity for both worst-case views on the reference laptop.
 - **Why:** Retained stopped-run lookup is a product promise, but stopped history must never re-enter
   live admission or mutate books. The one-run retention bound makes a second read-only materialization
   predictable and avoids a permanent database or repeated full replay for every UI query.
-- **Tradeoffs:** Opening the stopped run has replay latency and worst-case memory approaches two run
-  views. Retention replacement must invalidate the cached view safely.
+- **Tradeoffs:** The first stopped-run lookup has replay latency and worst-case memory approaches two
+  run views. The lookup temporarily obtains the append-ready descriptor required by the shared
+  recovery composition, then closes it before installing the read-only view. The API requires the
+  catalog path so a fresh controller can validate selection without guessing a journal filename.
 - **Rejected alternatives:** Pretend the active table can answer stopped-run requests; scan and replay
   the journal for every lookup; create an unbounded multi-run cache; add a permanent result database
   before the supported capacity is measured.
@@ -558,8 +593,9 @@ A useful new decision entry contains:
 
 ### D-029 — Compose one private driven path and latch append failure before matching
 
-- **Status:** Component ownership and reliability design; the ordered pause extension is D-030.
-  D-014, D-021, and D-028 remain applicable.
+- **Status:** Component ownership and reliability design; ordered pause and capacity extensions are
+  D-030 and D-031. Its temporary runtime-only failure disposition is superseded by D-032. D-014,
+  D-021, and D-028 remain applicable.
 - **Decision:** The controller owns one concrete, single-threaded component chain borrowing its run
   owners. Atomic staging is the Sequencer ingress. Each cycle checks append evidence before invoking
   matching or completion, and a non-committed append closes admission and latches unavailability.
@@ -571,9 +607,9 @@ A useful new decision entry contains:
   automatically retrying failed writes can hide durable uncertainty. Background workers would need
   lifecycle coordination beyond deterministic installation.
 - **Tradeoffs:** Earlier committed commands may remain queued after a later append failure; explicit
-  recovery must settle that journal before processing resumes. The runtime latch is conservative,
-  including capacity/representation failures, and is not durable catalog publication of FailStopped
-  or CapacityReached. One driver owns advancement and inspection; destruction is not a drain protocol.
+  recovery must settle that journal before processing resumes. At adoption, the conservative runtime
+  latch, including representation failures, did not durably publish FailStopped; D-032 adds that
+  publication boundary. One driver owns advancement and inspection; destruction is not a drain protocol.
 - **Revisit when:** Executable installation, catalog failure transitions, or coordinated pause/drain
   require a concrete synchronization and recovery contract. Preserve exact failure evidence, FIFO,
   one mutator per book, and controller ownership across installation.
@@ -598,14 +634,346 @@ A useful new decision entry contains:
   could duplicate effects or report an unproved lifecycle state. A new worker interface or queue
   would add ownership without improving this deterministic barrier.
 - **Tradeoffs:** The single driver must remain exclusive during pause. A failure conservatively
-  latches runtime unavailable, even when catalog replacement has a definite refusal or an uncertain
-  replacement is observed as Paused. In-place failed-path recovery and durable FailStopped
-  publication remain separate work.
+  enters the D-032 fail-stop publication path; a failed or uncertain publication remains runtime
+  unavailable even when the catalog replacement is observed. In-place failed-path recovery remains
+  separate work.
 - **Revisit when:** Background workers, executable admission wiring, or coordinated shutdown need
   a synchronization protocol; retain the closed-gate ordering, FIFO ownership, and exact failure
   evidence established by deterministic tests.
 - **Authority:** [Exchange Rules: Product scope and exchange runs](exchange-rules.md#product-scope-and-exchange-runs),
   [Architecture: Exchange-run controller](architecture.md#exchange-run-controller).
+
+### D-031 — Reserve run capacity before admission and drain through the existing path
+
+- **Status:** Adopted for the isolated single-driver controller path. It implements the existing
+  command-count and journal-byte capacity rules without changing their business semantics.
+- **Decision:** Before admitting an unseen key, the controller asks the journal writer to validate
+  and encode the prospective command with the existing codec. It combines that exact frame size with
+  the writer's committed position and one direct total for accepted but unappended work. The admission
+  index performs retained-history lookup first, then rejects an unavailable new key with
+  `RunCapacityReached` before reservation or staging. Exact exhaustion closes the gate immediately;
+  the existing driver drains accepted work and publishes terminal `CapacityReached` only after a
+  committed catalog replacement.
+- **Why:** Writer-only capacity checks are too late once multiple commands are admitted into a bounded
+  queue: a later accepted command could reach sequencing after the immutable run limit is already
+  consumed. Counting projected bytes at admission preserves the no-sequence/no-journal rejection and
+  still lets the writer enforce the authoritative limit at append.
+- **Alternatives:** Reserve then abandon exposes a transient record and recreates the removed rollback
+  hazard; duplicating frame-size formulas can drift from the journal format; a second queue or generic
+  reservation framework adds ownership; treating writer capacity as an append failure loses the
+  adopted admission response and lifecycle transition.
+- **Tradeoffs:** The mechanism relies on the documented single driver to update its two pending totals
+  after journal progress. Encoding is performed once for preflight and again by append. Invalid or
+  uncertain storage work bypasses the successful capacity transition and enters the D-032 fail-stop
+  publication path. Catalog replacement uncertainty remains unavailable even when reload observes
+  `CapacityReached`.
+- **Revisit when:** Multiple admission drivers or group commit are introduced. Preserve history-first
+  classification, atomic reservation and staging, exact codec-derived byte accounting, and the
+  committed catalog boundary before exposing a terminal runtime state.
+- **Authority:** [Exchange Rules: Product scope and exchange runs](exchange-rules.md#product-scope-and-exchange-runs),
+  [Exchange Rules: Run capacity and retained storage](exchange-rules.md#run-capacity-and-retained-storage),
+  [Architecture: Exchange-run controller](architecture.md#exchange-run-controller).
+
+### D-032 — Publish FailStopped once without disturbing failed work
+
+- **Status:** Adopted for the isolated single-driver controller path. It replaces D-029's temporary
+  runtime-only disposition while preserving that decision's ownership and phase boundary.
+- **Decision:** A non-committed append or matching/completion invariant exception closes admission,
+  retains every worker and queue owner in place, and stops component advancement. The controller
+  reports runtime `FailStopped` only after one checked `Open`-to-`FailStopped` catalog replacement
+  commits. Catalog load, active-run validation, generation exhaustion, replacement failure, or
+  replacement uncertainty leaves runtime `Unavailable` with the original processing failure and
+  nested publication evidence retained. No automatic publication or processing retry follows.
+- **Why:** A runtime-only latch closes the local process but leaves restart policy ambiguous, while
+  publishing before the failure owners are frozen could certify a state the process continued to
+  mutate. One durable terminal disposition gives restart a clear explicit-recovery boundary without
+  claiming that an uncertain rename or directory sync committed.
+- **Alternatives:** Continuing or draining risks duplicate append or mutation after an uncertain
+  boundary; retrying the failed append can extend an unknown journal tail; reporting `FailStopped`
+  from an observed snapshot after uncertain replacement treats observation as durability; clearing
+  queues or rebuilding state destroys diagnostic and recovery evidence. A generic lifecycle
+  transition framework would add indirection without a second transition sharing these failure-owner
+  rules.
+- **Tradeoffs:** Definite pre-replacement catalog failures may leave durable `Open` while runtime is
+  unavailable, and post-replacement uncertainty may leave durable `FailStopped` without allowing the
+  current process to claim it. Accepted commands and potentially mutated matching state remain owned
+  but unavailable until the explicit recovery operation in D-033 decides their authoritative
+  outcome.
+- **Revisit when:** Background workers require a quiescence protocol. Preserve the single publication
+  attempt, committed-only runtime transition, closed admission, original failure evidence, and all
+  pending ownership until D-033 recovery resolves it.
+- **Authority:** [Exchange Rules: Product scope and exchange runs](exchange-rules.md#product-scope-and-exchange-runs),
+  [Architecture: Exchange-run controller](architecture.md#exchange-run-controller).
+
+### D-033 — Reconstruct a persisted failed run from the journal before changing its disposition
+
+- **Status:** Adopted for explicit recovery in the isolated single-driver controller path. It extends
+  D-032 without weakening its failure latch or publication rule.
+- **Decision:** One operation accepts an explicit catalog path and recovers the selected run only
+  when its durable disposition is `FailStopped` or `RecoveryFailed`, including through a fresh
+  controller after restart. It canonicalizes and validates the catalog binding, run selection,
+  disposition, and generation before releasing an installed failed path. For installed
+  `FailStopped`, it captures the processing inspection and destroys borrowing workers before the run
+  owners and writer descriptor. The existing journal recovery, replay, matching-state reconstruction,
+  and admission reconstruction composition rebuilds temporary owners from complete authoritative
+  frames. A successful rebuild is installed closed only after `Paused` publication commits. A rebuild
+  failure from `FailStopped` publishes `RecoveryFailed` and installs nothing; another failed attempt
+  from durable `RecoveryFailed` returns the recovery evidence without rewriting the same disposition.
+  Any required publication failure or uncertainty leaves runtime `Unavailable`; no processing path is
+  installed automatically.
+- **Why:** The journal is the recovery authority, while failed queues and matching state are valuable
+  diagnostic evidence but may reflect uncommitted or uncertain work. An explicit catalog path makes
+  the same recovery boundary usable after restart. Preflight avoids destroying installed evidence for
+  an ineligible request. Destroying borrowers before owners makes the lifetime boundary explicit,
+  delaying owner installation until catalog commitment prevents a usable runtime state from
+  outrunning its durable disposition, and skipping a same-disposition failure rewrite avoids a
+  durability operation that conveys no new lifecycle fact.
+- **Alternatives:** Reusing the poisoned writer or mutated matching state cannot distinguish durable
+  work from local work. Replaying queued commands would elevate unjournaled reservations into
+  authority. Calling normal startup would bypass the explicit failed-run gate. Separate
+  `FailStopped` and `RecoveryFailed` operations would duplicate journal recovery and invite policy
+  drift. Publishing `Paused` before reconstruction could certify a run that cannot be rebuilt. A
+  generic lifecycle framework would add indirection without another independent recovery policy.
+- **Tradeoffs:** Accepted commands without complete journal frames disappear from the reconstructed
+  admission index, including queued work and immediate or incomplete writes; clients may resubmit
+  those keys after explicit resume. A complete frame after sync uncertainty is retained and replayed.
+  Callers must supply the intended catalog path explicitly. Publication failure after reconstruction
+  discards the temporary owners and requires external diagnosis because runtime becomes unavailable,
+  even when the catalog reload observes `Paused` or `RecoveryFailed`.
+- **Revisit when:** Recovery retry after uncertain publication or background workers are implemented.
+  Any revision must keep journal authority, borrower-before-owner destruction, closed admission,
+  committed-only runtime disposition, and the original nested evidence.
+- **Authority:** [Exchange Rules: Product scope and exchange runs](exchange-rules.md#product-scope-and-exchange-runs),
+  [Architecture: Exchange-run controller](architecture.md#exchange-run-controller).
+
+### D-034 — Commit stopped-run selection before releasing owners or deleting replaced history
+
+- **Status:** Adopted for explicit stop and one-stopped-run retention in the isolated single-driver
+  controller path. It implements the stop boundary anticipated by D-025 and the retention bound used
+  by D-027 without implementing the later read-only retained-run view.
+- **Decision:** One explicit operation stops a controller-owned `Ready`, `Paused`, or
+  `CapacityReached` run. It preflights the bound catalog, active identity, matching persisted
+  disposition, generation headroom, and exact confirmation of any stopped run that would be
+  replaced. `Ready` delegates its drain to the existing pause operation. The controller then commits
+  a catalog snapshot with no active run or disposition and the former active ID as the retained
+  stopped run. Only after commitment does it report `Stopped`, destroy the borrowing processing path
+  before the run owners, and remove the confirmed older journal followed by directory
+  synchronization. Cleanup has separate typed evidence; failure cannot turn the committed stop into
+  an uncommitted result.
+- **Why:** The catalog is the durable authority for which stopped run still has replay and result
+  guarantees. Deleting the older journal first could erase the only retained history while a failed
+  catalog update still selects it. Releasing active owners before commitment would discard completed
+  lookup and drain evidence needed when publication fails. Separating cleanup from stop commitment
+  accurately represents the case where selection changed durably but physical deletion did not.
+- **Alternatives:** Duplicating the Ready drain risks divergence from pause ordering; deleting before
+  publication creates a catalog-to-storage dangling reference; retaining active mutable owners after
+  committed stop leaves a second authority; treating cleanup failure as catalog failure falsely
+  claims the active run is still selected; automatic replacement without a named confirmation makes
+  irreversible history loss implicit.
+- **Tradeoffs:** Stopping directly from `Ready` consumes two catalog generations because `Paused` is
+  committed first. A failed cleanup can temporarily leave an unselected journal on disk and requires
+  external diagnosis, while the runtime and catalog correctly remain stopped. This slice releases
+  the stopped run's in-memory results after commitment, so adopted stopped-run lookup waits for the
+  separate immutable replay view.
+- **Revisit when:** Retained stopped-run lookup, replacement-run orchestration, or background workers
+  are implemented. Preserve exact confirmation, committed selection before deletion, durable
+  directory cleanup, separate cleanup evidence, and borrower-before-owner release.
+- **Authority:** [Exchange Rules: Product scope and exchange runs](exchange-rules.md#product-scope-and-exchange-runs),
+  [Architecture: Exchange-run controller](architecture.md#exchange-run-controller).
+
+### D-035 — Deliver the first live public and private views through one authenticated application stream
+
+- **Status:** Adopted behavior and intended architecture; transport implementation is pending. This
+  extends D-022 without merging its authoritative, participant-private, and public models.
+- **Decision:** The showcase's first outbound surface is a versioned JSON WebSocket stream owned by
+  an application event gateway. An HTTPS-authenticated server session supplies `ClientId`, the
+  browser explicitly binds one `ExchangeRunId`, and distinct public-batch and recipient-private
+  envelopes preserve their existing handoff order and privacy. The stream is live-only: it has no
+  application acknowledgement or reconnect replay, while known private command results remain
+  available through authoritative lookup for the active or retained run.
+- **Why:** The product's first visible experience needs the public tape and the participant's own
+  outcomes in one browser without teaching users FIX. Browser-native WebSocket messages preserve
+  complete envelope boundaries and ordered writes, while a server-side identity binding prevents a
+  browser from choosing another participant. Keeping `EventId` as source identity and using the
+  existing result lookup avoids inventing a second durable delivery log or presenting a non-gap-free
+  trade projection as a recoverable feed.
+- **Tradeoffs:** A disconnected browser can miss public trades, and private delivery is guaranteed
+  only through explicit authoritative lookup rather than unsolicited replay. There is no proof that
+  a browser processed a successful socket write. Bounded per-connection queues require explicit
+  slow-consumer disconnection, and messages on different connections or on the public and private
+  channels have no relative delivery-order guarantee. Operators must securely distribute and rotate
+  the startup credentials selected by D-038, and deployment still needs concrete operational buffer
+  and lifetime values.
+- **Rejected alternatives:** FIX-first delivery lacks adopted mappings for every private event and
+  does not serve the intended browser experience. Server-sent events provide one-way output, but
+  their automatic reconnect and `Last-Event-ID` conventions invite replay-cursor expectations that
+  this live-only surface deliberately does not promise. Polling weakens live causality and adds
+  repeated result scans. A broker, generic sink, or durable mailbox adds infrastructure and a second
+  persistence authority that the bounded local showcase does not require. Automatic reconnect replay
+  or application acknowledgements require delivery cursors and retention rules that have not been
+  justified. Exposing authoritative
+  batches would violate D-022's visibility boundary.
+- **Revisit when:** The product requires multiple simultaneous devices per client, guaranteed
+  unsolicited private delivery, recoverable public history, snapshots or gap recovery, non-browser
+  consumers, or measured connection volume beyond one bounded local gateway. Preserve server-side
+  recipient authorization, explicit run binding, complete-message ownership, and separation of
+  public and private schemas in any replacement.
+- **Authority:** [Exchange Rules: Browser application event delivery](exchange-rules.md#browser-application-event-delivery),
+  [Architecture: Application event gateway](architecture.md#application-event-gateway), and
+  [Product Direction: Phase 1](product-direction.md#phase-1--the-exchange-is-visible).
+
+### D-036 — Keep the initial browser gateway inside the C++ exchange application
+
+- **Status:** Adopted intended architecture; browser transport and executable integration are not
+  implemented.
+- **Decision:** The showcase's end-state initial deployment uses one C++ application process for the
+  application gateway and exchange. The gateway owns HTTPS termination, configured participant
+  authentication, session cookies, WebSocket connections, browser-protocol parsing, public/private
+  JSON serialization, routing, and bounded connection buffers. `ExchangeRunController` remains the
+  only lifecycle owner and retains its handoff queues until the gateway successfully pops an item.
+  The composition root coordinates startup and shutdown and destroys the borrowing gateway before
+  controller owners. Node and a separate Nginx service are removed from the target runtime rather
+  than retained as pass-through proxies. This extends D-035 by selecting its process placement; it
+  does not change D-035's live-only delivery behavior.
+- **Why:** The controller, projections, and exact JSON serializers already reside in C++. Co-locating
+  the browser gateway requires one ownership transfer at each existing controller handoff and no new
+  command, control, lifecycle, or result protocol. It gives the laptop showcase one bounded runtime,
+  one startup order, and one shutdown coordinator while keeping socket scheduling outside matching
+  decisions. The current Node service supplies only a greeting, so preserving it would add a durable
+  component boundary without reusing implemented exchange behavior.
+- **Rejected alternative:** A Node browser gateway in front of the C++ exchange would require a
+  second bounded protocol and runtime ownership boundary without a current isolation or scaling
+  requirement.
+- **Tradeoffs:** C++ must provide ordinary HTTPS, cookie, WebSocket, static-asset, and connection-state
+  facilities, which are less convenient than the Node ecosystem and enlarge the exchange
+  application's network-facing surface. A gateway bug can affect the same process as the exchange,
+  so bounded parsing, deterministic tests, explicit failure latching, and strict separation from the
+  matching path are required. The browser gateway cannot be deployed or scaled independently.
+- **Revisit when:** Measured connection load needs independent scaling, an operational security
+  boundary requires a separate Internet-facing process, multiple exchange processes share one
+  gateway, or another supported client needs a stable service API. Any replacement must preserve the
+  C++ projection and privacy boundaries or explicitly supersede D-022 and D-035.
+- **Authority:** [Architecture: Showcase process boundary](architecture.md#showcase-process-boundary),
+  [Architecture: Application event gateway](architecture.md#application-event-gateway), and
+  [Product Direction: Phase 1](product-direction.md#phase-1--the-exchange-is-visible).
+
+### D-037 — Run Beast/Asio TLS networking and the controller on one event-loop thread
+
+- **Status:** Adopted.
+- **Decision:** Use Boost.Beast for HTTP/1.1 and WebSocket, Boost.Asio for asynchronous TCP and timers,
+  and Boost.Asio SSL over OpenSSL for TLS. One event-loop thread owns network state, gateway calls,
+  and every post-startup controller call, with no cross-thread exchange queues. Validated startup
+  configuration requires certificate-chain and private-key paths; the runtime is TLS-only and has no
+  generated-certificate or plaintext fallback. Detailed ownership, bounds, and externally observable
+  behavior remain in the architecture and exchange rules.
+- **Why:** Beast and Asio already fit the repository's Boost dependency and provide HTTP, WebSocket,
+  TLS stream composition, asynchronous timers, and complete-message handling without another server
+  framework. A single event-loop owner satisfies the controller's existing single-driver contract
+  directly and avoids introducing command, control, and result queues solely to cross an internal
+  thread boundary. Official Beast examples cover combined HTTP/WebSocket TLS servers and timeouts;
+  Asio's SSL layer explicitly uses OpenSSL and needs no stream-level locking in a single-threaded
+  program. [Boost.Beast examples](https://www.boost.org/latest/libs/beast/doc/html/beast/examples.html),
+  [Boost.Asio SSL](https://www.boost.org/latest/doc/html/boost_asio/overview/ssl.html),
+  [CMake FindOpenSSL](https://cmake.org/cmake/help/latest/module/FindOpenSSL.html).
+- **Rejected alternatives:** A dedicated network thread plus an exchange-driver thread would require
+  new bounded command, control, lookup, lifecycle, and result ownership transfers without a measured
+  need. A separate C++ HTTP/WebSocket framework would duplicate facilities already available through
+  Boost and add another dependency and lifecycle model. The Node-process alternative remains rejected
+  by D-036.
+- **Tradeoffs:** Synchronous journal append and synchronization can delay socket progress and timer
+  callbacks on the single event-loop thread. Each turn must therefore perform bounded exchange work
+  and return to Asio, but this does not make the storage call nonblocking. The network-facing parser
+  and TLS stack share a process with the exchange, increasing the importance of strict parser limits,
+  exception boundaries, and shutdown ordering. One event-loop thread also bounds initial connection
+  scale.
+- **Authentication boundary:** D-038 defines the participant credential and session model. The
+  network runtime must preserve its server-derived identity, exact-Origin, secret-handling, and
+  revocation boundaries when login and authenticated WebSocket upgrades are implemented.
+- **Revisit when:** Measurements show journal stalls violate the configured network timeouts, one
+  event-loop thread cannot serve the supported connection bound, CPU-heavy protocol work delays the
+  deterministic driver, or an operational isolation requirement supersedes D-036. A threaded
+  replacement must define bounded queues and keep exactly one thread as the controller caller.
+- **Authority:** [Architecture: Application event gateway](architecture.md#application-event-gateway)
+  and [Exchange Rules: Browser application event delivery](exchange-rules.md#browser-application-event-delivery).
+
+### D-038 — Use operator-provisioned high-entropy bearer credentials and ephemeral browser sessions
+
+- **Status:** Adopted.
+- **Decision:** The local showcase starts with one bounded operator-provisioned mapping from fixed
+  `ClientId` values to canonical SHA-256 access-token digests. Raw access tokens contain at least 256
+  bits from a cryptographically secure random source and never enter configuration. Successful HTTPS
+  authentication creates one opaque 256-bit random in-memory session per client. The server derives
+  participant identity from the matched digest, sends only the session identifier in the hardened
+  host cookie, and applies the same exact-Origin boundary to WebSocket upgrades and state-changing
+  HTTP requests. Participant authentication authorizes participant commands, the participant's own
+  private results, and public events; it grants no lifecycle-control or privileged-view authority.
+  Detailed failure, lifetime, revocation, restart, and secrecy behavior remains in the exchange rules;
+  ownership remains in architecture.
+- **Why:** The showcase needs stable participant authorization for a small bounded operator-selected
+  set, but it has no account lifecycle or user directory. A securely generated 256-bit bearer secret
+  has enough search space for direct SHA-256 digest storage without importing password semantics or a
+  password database. That argument depends on operator-generated entropy: a digest cannot prove how
+  its preimage was generated, and a low-entropy token would permit offline guessing. TLS protects the
+  presented bearer secret in transit, while a separate short-lived random session secret limits
+  routine browser exposure and makes process restart a clean revocation boundary. NIST describes
+  random, non-persistent session secrets and hardened browser-cookie attributes in
+  [SP 800-63B](https://pages.nist.gov/800-63-4/sp800-63b.html). That guidance informs the controls but
+  does not assign the showcase a NIST assurance level or make its configured identity proof of a
+  person or institution.
+- **Rejected alternatives:** Passwords require salted password hashing, enrollment, reset, storage,
+  and abuse controls that the showcase does not provide. OAuth or OpenID Connect adds an external
+  identity provider and redirect/session lifecycle without a current product need. Browser client
+  certificates complicate provisioning and local browser use. Storing raw access tokens increases
+  disclosure impact. Persistent sessions, refresh tokens, and multiple simultaneous sessions per
+  client add recovery, revocation, and device-management state outside the bounded initial scope.
+- **Tradeoffs:** Possession of either bearer secret is sufficient for impersonation until revocation
+  or expiry. Provisioning and rotation are manual operator duties, credential changes require a
+  restart, and restart logs out every browser. One-session replacement prevents concurrent devices.
+  The design supplies a stable configured `ClientId`, not identity proof, federation, account
+  recovery, or an auditable user directory. Constant-time digest comparison limits comparison
+  leakage but does not compensate for weak operator-generated tokens or compromised endpoints.
+- **Revisit when:** The showcase becomes Internet-facing beyond its controlled local deployment,
+  needs self-service enrollment or recovery, supports multiple simultaneous devices, requires token
+  rotation without restart, must integrate an organizational identity provider, or gains audit,
+  compliance, phishing-resistance, or real-person verification requirements. A replacement must keep
+  browser-selected identity out of normalized commands and preserve strict participant-private
+  authorization.
+- **Authority:** [Exchange Rules: Browser participant authentication and sessions](exchange-rules.md#browser-participant-authentication-and-sessions)
+  and [Architecture: Participant identity and session ownership](architecture.md#participant-identity-and-session-ownership).
+
+### D-039 — Use canonical fixed-size secrets and one minimal HTTPS session resource
+
+- **Status:** Adopted.
+- **Decision:** Access tokens and session identifiers are 32-byte random values represented as
+  canonical 43-character unpadded base64url strings. Startup credential records contain fixed
+  `ClientId` values and 32-byte SHA-256 digests; an external adapter may represent a digest only as
+  64 lowercase hexadecimal characters. `POST /v1/session` accepts one exact bounded JSON V1 shape,
+  derives identity server-side, and returns the authenticated `ClientId` with one hardened
+  `__Host-exchange-session` cookie. `DELETE /v1/session` is an idempotent logout and cookie-clearing
+  operation. Detailed status, body, replacement, expiry, and idle-refresh behavior remains in the
+  exchange rules.
+- **Why:** Fixed decoded sizes make allocation and validation bounds exact, while canonical text
+  forms prevent multiple spellings of the same secret. Returning `ClientId` from login gives the UI
+  its own participant identity without adding a separate profile endpoint. One session resource
+  avoids a router or account API, and typed credential records let the core proceed without choosing
+  a configuration-file framework before the application composition exists.
+- **Rejected alternatives:** Password and OAuth flows remain outside D-038's scope. Padded base64,
+  arbitrary strings, and multiple accepted encodings create unnecessary normalization cases. A raw
+  token in configuration increases disclosure impact. A separate current-session endpoint duplicates
+  the successful login response. Making logout reveal whether a session existed adds an avoidable
+  state oracle. Choosing JSON, TOML, environment, or command-line credential storage here would bind
+  the security core to an application-composition detail.
+- **Tradeoffs:** Operators still need separate tooling to generate and distribute raw tokens and
+  construct the typed startup records. The narrow JSON parser must reject duplicates and unknown
+  properties. The controlled local scope has no per-source login-attempt state; external exposure
+  requires revisiting throttling. A random-source failure or identifier collision disables new login
+  until restart but preserves an already authorized session.
+- **Revisit when:** The product needs a general account API, credential rotation without restart,
+  multiple credential types, an external identity provider, deployment behind a trusted proxy, or
+  exposure that requires rate limiting. Preserve canonical secret decoding, server-derived identity,
+  uniform invalid-credential behavior, and bounded session state in any replacement.
+- **Authority:** [Exchange Rules: Browser participant authentication and sessions](exchange-rules.md#browser-participant-authentication-and-sessions)
+  and [Architecture: Participant identity and session ownership](architecture.md#participant-identity-and-session-ownership).
 
 ## Part II — Superseded designs and what they taught us
 

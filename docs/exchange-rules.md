@@ -302,8 +302,13 @@ rejected before sequencing and cannot address a numerically equal order in anoth
 - Each participant receives a private execution view containing the event identity, instrument, its
   own order identity, role or side, execution price and quantity, and its own remaining quantity.
   It does not disclose the counterparty's `ClientId`, `OrderId`, or remaining quantity.
-- Sanitized trade information may later be public. The initial rules do not yet adopt a public trade
-  feed or its format.
+- A self-trade produces two recipient-private trade views in deterministic maker-then-taker order so
+  both owned orders are represented.
+- The transport-neutral public trade projection emits exactly one public value for each authoritative
+  `Trade`, preserving event order and `EventId`. It contains only `EventId`, `InstrumentId`, execution
+  price, execution quantity, and aggressor side. It contains no client, client-command, order, or
+  remaining-quantity identity and retains no authoritative event or result batch.
+- A self-trade produces one public trade. Non-trade events produce no public market-data value.
 - `OrderRested`, `OrderCancelled`, and `CommandRejected` are private to the affected client. Their
   resulting book or quote changes may later produce separate public market-data events.
 - Committed private results survive client disconnection while their exchange run is retained.
@@ -314,6 +319,281 @@ rejected before sequencing and cannot address a numerically equal order in anoth
 - Retrieval or redelivery preserves the original `CommandSequence` and `EventId` values. It creates
   no new command, sequence, event, trade, or matching-state mutation.
 - Automatic unsolicited replay to a reconnected session is not required initially.
+
+### Participant-private result handoff
+
+- The private handoff unit is one command's complete ordered participant-private fan-out. It contains
+  one envelope per affected `ClientId`, in deterministic first-event appearance order, and preserves
+  the projected private-event order within each envelope. An empty projection creates no entry.
+- One fan-out batch is accepted atomically. Partial recipient insertion or delivery, silent drop,
+  overwrite, and overtaking are forbidden.
+- Handoff capacity is an explicit bound on the total number of contained private events, not on the
+  number of command batches or recipient envelopes. Configuration must use checked arithmetic and
+  provide room for at least `2 × MaxEventsPerCommand` private events so one worst-valid projection
+  fits when the queue is empty. The factor of two accounts for a self-trade producing maker and taker
+  private events from one authoritative `Trade`.
+- When the private boundary cannot accept a complete fan-out, the dispatcher retains exactly that
+  one projected batch and consumes no later authoritative command result until acceptance succeeds.
+- Admission completes exactly once. The dispatcher retains the immutable authoritative command
+  result until its private and public projections are each empty or atomically accepted by their
+  respective handoffs. A retry never recompletes admission or reprojects either view.
+- Private and public acceptance are independent; one channel may accept before the other. Each
+  channel independently preserves command and event order, and neither may overtake its own pending
+  earlier batch.
+- Successful private-queue acceptance transfers handoff ownership to the private-delivery component,
+  which routes each envelope by its stable `ClientId`. Protocol formatting and session selection do
+  not change the accepted private result.
+- An identical completed retransmission uses the retained authoritative-result lookup. It does not
+  enqueue another unsolicited live private result.
+- Replay and recovery may regenerate private projections for reconstruction and validation but do not
+  enqueue unsolicited delivery. The live private queue is not persisted across process failure; the
+  journal and reconstructed admission result remain authoritative for explicit retransmission or
+  retained-run lookup.
+- Pause and stop never discard a pending or queued private fan-out. If the private-delivery consumer
+  cannot relieve backpressure, lifecycle advancement reports retryable incomplete progress rather
+  than successful completion.
+- FIX formatting, FIX session selection, FIX acknowledgements, and external result-history request
+  formats remain deferred.
+
+### Public-trade handoff
+
+- The public handoff unit is one command's complete ordered public-trade batch. A command whose
+  authoritative result contains no trades creates no public handoff entry.
+- One batch is accepted atomically. Partial insertion, partial publication, silent drop, and
+  overwrite are forbidden.
+- Handoff capacity is an explicit bound on the total number of queued public-trade records, not only
+  the number of batches. It must be large enough to accept one command containing the maximum
+  supported result size when empty.
+- When the boundary cannot accept a complete batch, the dispatcher retains that one batch and stops
+  consuming later command results until acceptance succeeds. The dispatcher retains at most one
+  pending batch outside the queue.
+- Successful queue acceptance ends exchange-side handoff ownership. Subsequent transport delivery
+  is the market-data publisher's responsibility and cannot change the accepted exchange result.
+- `EventId` remains the stable identity of the authoritative source event. Because commands without
+  trades create no entry and no public feed sequence is adopted, consumers must not interpret
+  `EventId` as a gap-free market-data sequence.
+- Replay and recovery regenerate public projections for internal validation without unsolicited
+  external publication.
+- Pause and stop never discard a pending or queued public-trade batch. If the consumer cannot relieve
+  backpressure, lifecycle advancement reports retryable incomplete progress rather than successful
+  completion.
+- No snapshot, gap-recovery protocol, top-of-book, or depth is adopted by this handoff contract.
+
+### Browser application event delivery
+
+- Browser HTTP and WebSocket traffic is served only through TLS with a minimum protocol version of
+  TLS 1.2. There is no plaintext listener or fallback. Missing, invalid, or mismatched configured
+  certificate and private-key material prevents the browser gateway from becoming ready.
+- HTTPS serves the built browser assets and the adopted login/session surface. Once authenticated,
+  the application WebSocket is bidirectional: complete inbound messages carry participant commands,
+  and complete outbound messages carry the public and participant-private envelopes defined below.
+  Inbound messages cannot supply or override the server-side participant identity.
+- Configured finite limits bound HTTP headers and bodies, WebSocket inbound messages, connection
+  count, handshakes, idle connections, static assets, outbound bytes, and shutdown flushing. A
+  request or message that exceeds its limit is rejected before command submission or lifecycle
+  mutation. Handshake or idle timeout closes the affected connection. Exact deployment values are
+  configuration, not exchange constants.
+- The first external delivery surface is a versioned JSON application event stream carried by one
+  WebSocket connection between an authenticated browser and the application event gateway. It is
+  the showcase's participant and public-event surface; FIX result delivery remains separate and
+  deferred.
+
+#### Browser participant authentication and sessions
+
+- The showcase has no public registration, password reset, password credential, or account database.
+  Before startup, an operator provisions a bounded one-to-one list of fixed `ClientId` values and
+  SHA-256 access-token digests. The typed application configuration supplies each digest as exactly
+  32 bytes; any external configuration adapter must decode it from exactly 64 lowercase hexadecimal
+  characters. One positive configured maximum credential count bounds the nonempty list. Because
+  each configured client can have at most one session, the credential count also bounds active
+  sessions. No raw access token enters startup configuration.
+- Each raw access token is exactly 32 bytes generated by a cryptographically secure random source.
+  Operators distribute its canonical unpadded base64url representation: exactly 43 ASCII characters
+  using only `A-Z`, `a-z`, `0-9`, hyphen, and underscore. Authentication hashes the decoded 32 bytes.
+  A decoder also requires that re-encoding those bytes reproduces the input exactly, rejecting unused
+  trailing-bit variants rather than accepting another spelling of the same token.
+  Token generation and secure delivery are operator responsibilities; the process cannot infer the
+  original token's entropy from a digest.
+- An empty credential list, duplicate `ClientId` values, duplicate digests, malformed digests, a zero
+  maximum credential count, a credential list above that count, and non-positive or unbounded
+  session lifetimes fail startup before the HTTPS listener opens.
+- Login uses `POST /v1/session` over HTTPS with exactly one `Content-Type` field whose media type is
+  `application/json` and has no parameters. Its bounded V1 body
+  is one JSON object containing exactly `schemaVersion` with integer value `1` and `accessToken` with
+  the canonical 43-character token representation. Each property occurs once, unknown properties are
+  rejected, and property order is not significant. The request contains no participant identity.
+- Authentication derives `ClientId` exclusively from the configured digest mapping. Browser input
+  cannot select or override it. The implementation scans the bounded credential set without an
+  early match exit and compares each digest in constant time. A malformed or unknown token receives
+  the same `401` response with `Content-Type: application/json`, `Cache-Control: no-store`, and exact
+  body `{"schemaVersion":1,"error":"AUTHENTICATION_FAILED"}`. Malformed JSON, missing, duplicate or
+  unknown properties, the wrong schema version or JSON types, and a malformed or unknown token all
+  use that response. HTTP framing or configured header/body-limit failures remain transport errors;
+  an unsupported method or media type is rejected before authentication.
+- For `/v1/session`, a method other than `POST` or `DELETE` returns `405` with `Allow: POST, DELETE`;
+  a `POST` with a missing, duplicate, parameterized, or different media type returns `415`; configured
+  header or body overflow returns the existing bounded HTTP error; malformed HTTP framing returns
+  `400`; and Origin or authority failure returns `403`. These failures perform no credential or
+  session lookup.
+- A successful login returns `200`, `Content-Type: application/json`, `Cache-Control: no-store`, the
+  session cookie below, and exact body
+  `{"schemaVersion":1,"clientId":"<canonical unsigned decimal ClientId>"}`. Raw access tokens,
+  configured credential digests, session identifiers, and cookies are never logged or returned
+  through diagnostics; the successful response exposes only the authenticated client's ordinary
+  public identifier.
+- A successful login creates an opaque in-memory session identifier as exactly 32 bytes from a
+  cryptographically secure random source and represents it as 43 canonical unpadded base64url
+  characters under the same decode-and-re-encode rule as an access token. The cookie name is
+  `__Host-exchange-session`; it has `Secure`, `HttpOnly`,
+  `SameSite=Strict`, `Path=/`, and no `Domain`, `Expires`, or `Max-Age` attribute. Server-side
+  deadlines remain authoritative even if a browser retains a stale cookie.
+- Session-identifier generation is attempted once. Generator failure or collision fails closed,
+  leaves any existing session unchanged, latches new login unavailable until restart, and returns a
+  `503` response with `Content-Type: application/json`, `Cache-Control: no-store`, and exact body
+  `{"schemaVersion":1,"error":"SERVICE_UNAVAILABLE"}`. Once latched, later login requests receive the
+  same response without credential comparison. No partially created session or cookie is exposed.
+- Each `ClientId` has at most one active browser session. A successful replacement first generates
+  and validates a unique new session identifier. It then atomically revokes the old session, removes
+  its gateway binding, and activates the new session. The network owner asynchronously closes the
+  old socket after authorization has been removed; socket shutdown is not part of the atomic
+  replacement. If the successful login request presented another valid session cookie, that session
+  and binding are revoked in the same transition; a failed login never revokes the presented session.
+- Every session has configured positive finite idle and absolute lifetimes. Authenticated activity
+  may extend the idle deadline but never the absolute deadline. Every authenticated lookup and
+  WebSocket action checks both deadlines against a monotonic clock before granting access; timers
+  perform cleanup only and cannot extend authorization when their callbacks run late. Logout, idle
+  expiry, and absolute expiry revoke the session, remove its gateway binding, and asynchronously
+  close its authenticated WebSocket.
+- Successful WebSocket upgrade and each syntactically valid complete authenticated HTTP request or
+  WebSocket application message refresh the idle deadline. Business rejection after that point does
+  not undo the refresh. Outbound delivery, TCP/TLS traffic, WebSocket ping/pong or close frames,
+  malformed input, failed authentication, and unauthorized requests do not refresh it.
+- Sessions and WebSocket bindings are process-local. Process restart invalidates every session
+  identifier, so any retained browser cookie becomes stale and is rejected. Sessions are not
+  journaled or recovered, and there is no refresh token or automatic reissuance.
+- A WebSocket upgrade requires both a valid session cookie and an exact match with the one configured
+  HTTPS `Origin`, plus the same effective-authority validation required for state-changing HTTP
+  requests. These checks occur before session lookup or upgrade. The authenticated session supplies
+  `ClientId`; the browser sends no identity claim. The browser explicitly requests one
+  `ExchangeRunId`, which the gateway validates and binds to the current controller-owned run. At most one live connection is bound to a
+  `(ClientId, ExchangeRunId)` pair; a replacement closes the previous binding first.
+- State-changing HTTP requests, including login and logout, enforce the same exact configured Origin.
+  Configuration accepts one canonical ASCII HTTPS origin: `https://` followed by a lowercase DNS
+  name, canonical IPv4 literal, or bracketed canonical IPv6 literal and an optional canonical decimal
+  port. Port `443` is omitted; another port is in `1..65535` with no leading zero. User information,
+  an empty host, a trailing dot, path, query, fragment, and trailing slash are invalid.
+  Before authentication, the request must yield exactly one effective authority. A `Host` value must
+  be present exactly once; missing, duplicate, or conflicting authority values are rejected, and the
+  effective authority must equal the authority of that Origin. The gateway reuses this one Origin
+  setting and provides no permissive CORS behavior.
+- Every request parser inspects all `Cookie` fields and pairs while ignoring unrelated cookie names.
+  More than one `__Host-exchange-session` pair anywhere in the request is a malformed request and is
+  rejected before session lookup. Login may omit the cookie; one canonical valid value participates
+  in successful cross-client replacement, while one malformed, stale, or expired value grants no
+  authority and causes no revocation. Logout may omit it and treats one malformed, stale, or expired
+  value as absent. An authenticated HTTP request or WebSocket upgrade requires exactly one canonical
+  session-cookie value and a successful session lookup.
+- Logout uses `DELETE /v1/session` with no request body or `Content-Type`. Either field is rejected
+  with `400` before session
+  lookup. After Origin and authority validation logout is idempotent: exactly one valid session cookie
+  is revoked, while a missing, stale, malformed, or expired cookie changes no server state.
+  Every such request returns `204`, `Cache-Control: no-store`, and clears
+  `__Host-exchange-session` with the same cookie attributes plus `Max-Age=0`; it returns no body and
+  discloses no prior session state.
+- Participant authentication authorizes only order submission and cancellation, access to that
+  participant's own private results, and receipt of public events. Exchange-run lifecycle controls
+  and privileged educational views remain denied until a separate authorization policy is adopted.
+- This configuration establishes a stable local-showcase participant identity. It is not
+  cryptographic proof of a real person, organization, or regulated institution.
+
+#### Application-event JSON V1 schema
+
+- Each payload is compact UTF-8 JSON with no insignificant whitespace. Properties appear in the
+  exact order specified below so identical values produce identical bytes. The outer
+  `schemaVersion` is the JSON integer `1`.
+- Every 64-bit identifier, price, and quantity is a JSON string containing its canonical unsigned
+  decimal representation: ASCII digits only, with `"0"` as the only zero form and no sign or leading
+  zero. `EventIndex` is a JSON integer. Enum values use only the stable names specified below, never
+  their underlying integer values.
+- Every `eventId` object has properties in this order:
+  `exchangeRunId`, `commandSequence`, `eventIndex`. Its first two values are decimal strings and its
+  event index is an integer.
+- JSON strings escape quotation mark and reverse solidus as `\"` and `\\`; use `\b`, `\f`, `\n`,
+  `\r`, and `\t` for those ASCII controls; and encode other bytes below `0x20` plus `0x7f` as a
+  lowercase `\u00xx` escape. Other permitted ASCII bytes are emitted unchanged.
+- A public envelope has properties in this order: `schemaVersion`, `type`, `exchangeRunId`,
+  `trades`. `type` is `"publicTrades"`; `trades` is one nonempty complete ordered public-trade batch.
+  Each trade has properties in this order: `eventId`, `instrumentId`, `executionPrice`,
+  `executionQuantity`, `aggressorSide`. These are exactly the fields of `PublicTrade`.
+- A private envelope has properties in this order: `schemaVersion`, `type`, `exchangeRunId`,
+  `recipientClientId`, optional `correlation`, `events`. `type` is `"privateResult"`; `events` is one
+  nonempty complete ordered recipient result. `correlation` is omitted when absent. When present, it
+  has properties in this order: `exchangeRunId`, `clientId`, `clientCommandId`, `commandSequence`.
+- A private event begins with `type`, followed by these ordered properties:
+  - `"privateTrade"`: `eventId`, `instrumentId`, `orderId`, `side`, `role`, `executionPrice`,
+    `executionQuantity`, `remainingQuantity`;
+  - `"orderRested"`: `eventId`, `orderId`, `clientId`, `instrumentId`, `side`, `price`,
+    `remainingQuantity`;
+  - `"orderCancelled"`: `eventId`, `orderId`, `clientId`, `instrumentId`, `cancelledQuantity`,
+    `reason`; and
+  - `"commandRejected"`: `eventId`, `commandType`, `clientId`, `clientCommandId`, optional
+    `relevantOrderId`, `reason`. `relevantOrderId` is omitted when absent.
+- Stable JSON enum names are: side `"BUY"` or `"SELL"`; private trade role `"MAKER"` or `"TAKER"`;
+  command type `"NEW_ORDER"` or `"CANCEL"`; cancellation reason `"CLIENT_REQUESTED"` or
+  `"IOC_REMAINDER"`; and command-rejection reason `"ORDER_NOT_ACTIVE"`, `"NOT_OWNER"`, or
+  `"BOOK_CAPACITY_EXCEEDED"`.
+- Public JSON contains no client, client-command, order, correlation, remaining-quantity, or
+  authoritative-event fields. `PrivateTrade` contains no counterparty client, order, or remaining
+  quantity. Other private variants retain only the affected participant's projected fields.
+- Serialization rejects an empty batch, an event whose run differs from the outer run, events from
+  different command sequences, a correlation whose run or sequence differs from its events, a
+  correlation whose client differs from the recipient, a private terminal event for another client,
+  or an unknown enum. Validation failure leaves the caller's output unchanged. Serialization builds
+  no externally visible partial payload.
+- `EventId` remains the stable source-event identity. No additional feed sequence is implied.
+- One public batch or one recipient-private envelope occupies one WebSocket message. A message is
+  queued and written as a whole. Public batches preserve command-batch and intra-batch order;
+  private messages preserve command order for each recipient and event order within the recipient
+  envelope. Different recipients, and the public and private channels, have no cross-connection or
+  cross-channel delivery-order guarantee.
+- Every authenticated connection bound to the run is eligible for the same sanitized public
+  envelopes. A private envelope is eligible only for the connection whose server-side `ClientId`
+  equals its recipient. Taking ownership of a complete private fan-out is atomic, but observation on
+  different recipient connections is not simultaneous or atomic.
+- The application event gateway owns a batch after it pops the corresponding exchange handoff
+  queue. It retains a complete popped item until it has routed every eligible envelope; it never
+  returns it to matching or changes the authoritative result. Each per-connection outbound queue has
+  one configured capacity measured in total serialized bytes and must hold one maximum valid
+  controller-produced V1 handoff. A configured maximum connection count bounds broadcast expansion.
+  The gateway does not pop a later handoff item while its retained item cannot be routed.
+- A connection whose outbound queue cannot accept its next complete message is closed as a slow
+  consumer before that message is partially queued. An offline or disconnected participant receives
+  no unsolicited delivery. Its private command result remains available through the authoritative
+  identical-command or retained-result lookup. A disconnected browser can miss public trades because
+  no public replay or snapshot is adopted.
+- The browser sends no application-level delivery acknowledgement. Successful socket write is not a
+  claim that the browser processed or durably stored the message. Reconnect creates a new live
+  binding at the current stream position and never triggers automatic replay. The UI must surface a
+  connection interruption rather than imply continuity.
+- Pause and stop continue to wait until the exchange-side private and public handoff queues have
+  transferred their accepted items to the gateway. Once transferred, gateway buffering no longer
+  blocks the controller's lifecycle transition. A pause keeps the same run binding and the gateway
+  may finish its bounded writes while the run is paused. After a committed stop, the gateway finishes
+  or explicitly abandons bounded socket writes under the disconnect rule, then closes that run's
+  bindings; a later run requires an explicit new binding and never receives buffered data from the
+  stopped run.
+- Coordinated shutdown stops new WebSocket bindings and command ingress, pauses the active run while
+  continuing to consume its exchange handoffs, then attempts to flush gateway-owned buffers within a
+  configured finite deadline before closing connections. Deadline expiry follows the same explicit
+  disconnect rule: private results remain recoverable by lookup while missed public data is not.
+- Before serializing or enqueueing a private message, the gateway compares the envelope's
+  `ClientId` with the server-side connection binding. A mismatch is an invariant and authorization
+  failure and closes the connection without sending the envelope. Only the sanitized `PublicTrade`
+  model enters a public envelope; authoritative `Trade` and `CommandResultBatch` values never enter
+  this participant-facing stream.
+- The unsolicited stream is live-only. Journal replay and recovery do not publish it. Explicit
+  participant-private lookup remains authoritative for a known command while its active or retained
+  run is available; public history, snapshots, and replay remain deferred.
 
 ### Result capacity and event handoff
 
@@ -578,7 +858,8 @@ rejected before sequencing and cannot address a numerically equal order in anoth
 - Replay regenerates private results without publishing external FIX responses, multicast output,
   or market data. Live unsolicited delivery resumes only after the controller reaches `Ready`;
   explicit identical-command or read-only retrieval is available in `Paused` after successful
-  recovery. Protocol-specific reconnect delivery remains unresolved.
+  recovery. The browser application stream never replays automatically after reconnect; FIX-specific
+  reconnect delivery remains unresolved.
 - Snapshots are not required for the initial bounded run. If measured full-replay time at maximum
   supported run capacity is unacceptable, a later rule may add versioned, checksummed, atomically
   published snapshots as replay accelerators. The journal remains authoritative.
@@ -638,11 +919,21 @@ remain deliberately unspecified.
 
 ### 4. Event visibility and delivery
 
-Initial private visibility, identical-command result retrieval, and concurrent cross-partition
-publication are adopted. The following remain unresolved:
+Initial private visibility, the bounded participant-private handoff, identical-command result
+retrieval, the browser application stream, and concurrent cross-partition publication are adopted.
+The following remain unresolved:
 
 - Protocol-specific result-history requests beyond identical command retransmission.
-- Whether a protocol automatically sends unacknowledged results after reconnect.
+- FIX acknowledgement and reconnect-redelivery behavior.
+- The configured private-handoff capacity above the required worst-projection minimum.
+- Exact operator token-generation and secure-distribution procedure and the external source from
+  which the composition root constructs the adopted typed credential records.
+- Deployment values for the allowed HTTPS Origin, maximum credential count, and idle and absolute
+  session lifetimes.
+- Application-level login-attempt throttling if the showcase is exposed beyond its controlled local
+  environment; the initial contract adds no per-source identity or rate-limit state.
+- Authorization policy for exchange-run lifecycle controls and privileged educational views.
+- Exact gateway outbound-byte capacity, maximum connection count, and shutdown flush deadline.
 
 ### 5. Instrument and configuration lifecycle
 
@@ -693,25 +984,18 @@ preserving priority only for a quantity reduction at the same price.
 
 ### 9. Market-data events
 
-**Question:** What public market data does the exchange publish?
+The sanitized public-trade value, one-command atomic handoff unit, record-count capacity rule,
+pending-batch backpressure, ownership transfer, suppressed replay publication, and live browser
+transport are adopted above. The following remain unresolved and deferred:
 
-**Options to decide:**
+- Top-of-book, aggregated-depth, and order-by-order public views.
+- A distinct market-data sequence and its relationship to source `EventId` values.
+- Snapshot, reconnect replay, and gap-recovery protocols.
+- The configured handoff capacity above the required one-maximum-command minimum.
 
-- Trades only.
-- Top of book.
-- Aggregated depth.
-- Order-by-order depth.
-
-**Additional decisions:**
-
-- Snapshot and incremental-update formats.
-- Sequence and gap recovery.
-- Relationship between private execution events and public market data.
-
-**Current recommendation:** Start with sanitized trades, top of book, and aggregated depth. Do not
-publish order-by-order private state. A privileged educational view may inspect internal state but
-must remain visibly distinct from participant and public views. Do not describe a live feed as
-recoverable until its snapshot and sequence-gap behavior are adopted and implemented.
+A privileged educational view may inspect internal state but remains visibly distinct from
+participant and public views. No live feed is described as recoverable until its snapshot and
+sequence-gap behavior are adopted and implemented.
 
 ### 10. Recovery operations and migration
 
@@ -729,8 +1013,9 @@ suppressed external replay publication are adopted. The following remain unresol
 unavailable?
 
 The per-command result bound, `GatewayBusy` response for temporary pre-sequence saturation,
-`RunCapacityReached` response for run exhaustion, fail-closed durable-capacity behavior, and
-post-commit event-handoff behavior are adopted. Other internal boundaries still require decisions.
+`RunCapacityReached` response for run exhaustion, fail-closed durable-capacity behavior,
+post-commit event-handoff behavior, and bounded public-trade handoff contract are adopted. Other
+internal boundaries still require decisions.
 
 **Options to decide:**
 
@@ -768,8 +1053,8 @@ contradiction is an invariant failure.
 Publication across independent partitions is not globally merged. Per-partition and per-command
 ordering remain required as specified in the adopted rules.
 
-Trading sessions, expiry, modification, additional order types, market data, snapshots, and group
-commit can remain deferred. Exchange-run identity, lifecycle, capacity, retention, and journal
-metadata must be implemented before durable replay is described as conforming. New-order
-state-machine tests can continue before event delivery and cross-partition publication are
-implemented, provided the tests use the adopted event schemas and ordering.
+Trading sessions, expiry, modification, additional order types, additional market-data views and
+transports, snapshots, and group commit can remain deferred. Exchange-run identity, lifecycle,
+capacity, retention, and journal metadata must be implemented before durable replay is described as
+conforming. New-order state-machine tests can continue before event delivery and cross-partition
+publication are implemented, provided the tests use the adopted event schemas and ordering.

@@ -13,6 +13,7 @@ struct RunCatalogStorageHooks {
     ssize_t (*writeFile)(void* context, int descriptor, const void* buffer, std::size_t size) noexcept {nullptr};
     int (*syncFile)(void* context, int descriptor) noexcept {nullptr};
     int (*replaceFile)(void* context, const char* source, const char* destination) noexcept {nullptr};
+    int (*removeFile)(void* context, const char* path) noexcept {nullptr};
 };
 
 [[nodiscard]] const RunCatalogStorageHooks& systemRunCatalogStorageHooks() noexcept;

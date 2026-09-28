@@ -31,11 +31,12 @@ int systemReplaceFile(void*, const char* source, const char* destination) noexce
     return ::rename(source, destination);
 }
 
+int systemRemoveFile(void*, const char* path) noexcept {
+    return ::unlink(path);
+}
+
 const detail::RunCatalogStorageHooks SYSTEM_HOOKS{
-    nullptr,
-    systemWriteFile,
-    systemSyncFile,
-    systemReplaceFile,
+    nullptr, systemWriteFile, systemSyncFile, systemReplaceFile, systemRemoveFile,
 };
 
 RunCatalogLoadResult ioLoadFailure(int systemError) {

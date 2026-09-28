@@ -21,6 +21,7 @@ enum class AdmissionRejectionReason : std::uint8_t {
     DUPLICATE_COMMAND_CONFLICT = 1,
     EXCHANGE_RUN_UNAVAILABLE = 2,
     GATEWAY_BUSY = 3,
+    RUN_CAPACITY_REACHED = 4,
 };
 
 enum class CommandRejectionReason : std::uint8_t {

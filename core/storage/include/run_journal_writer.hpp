@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <sys/types.h>
 #include <vector>
 
@@ -64,6 +65,10 @@ public:
 
     [[nodiscard]] RunJournalAppendResult append(const JournalNewOrderV1 &command) noexcept;
     [[nodiscard]] RunJournalAppendResult append(const JournalCancelV1 &command) noexcept;
+
+    // Validates context and encodes with the authoritative codec without checking capacity or writing.
+    [[nodiscard]] std::optional<std::size_t> prospectiveFrameSize(const JournalNewOrderV1 &command) const noexcept;
+    [[nodiscard]] std::optional<std::size_t> prospectiveFrameSize(const JournalCancelV1 &command) const noexcept;
 
     [[nodiscard]] std::uint64_t committedCommandCount() const noexcept;
     [[nodiscard]] std::uint64_t committedByteCount() const noexcept;

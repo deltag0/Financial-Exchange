@@ -10,7 +10,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 enable_testing()
 
 # Find Boost
-find_package(Boost 1.71 REQUIRED)
+find_package(Boost 1.71 REQUIRED COMPONENTS system)
+find_package(OpenSSL REQUIRED COMPONENTS SSL)
 
 find_library(QUICKFIX_LIB quickfix REQUIRED)
 
@@ -47,6 +48,7 @@ add_subdirectory(core/admission)
 add_subdirectory(core/storage)
 add_subdirectory(matching_engine)
 add_subdirectory(core/recovery)
+add_subdirectory(core/application)
 add_subdirectory(sequencer)
 add_subdirectory(core/fix)
 

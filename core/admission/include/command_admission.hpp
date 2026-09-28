@@ -122,8 +122,12 @@ private:
     friend class CommandAdmissionIndexTestAccess;
 
     void setAdmissionOpen(bool open);
+    [[nodiscard]] AdmissionDecision reserveAndStageForRunCapacity(
+        const sequencer::sequenceMessage& command, core::SharedQueue<sequencer::sequenceMessage>& stagingQueue,
+        bool capacityAvailable);
     [[nodiscard]] AdmissionDecision reserveImpl(const sequencer::sequenceMessage& command,
-                                                core::SharedQueue<sequencer::sequenceMessage>* stagingQueue);
+                                                core::SharedQueue<sequencer::sequenceMessage>* stagingQueue,
+                                                bool capacityAvailable = true);
 
     friend CommandAdmissionRecoveryResult reconstructCommandAdmissionIndex(
         const storage::LoadedRunJournalV1& journal,

@@ -113,6 +113,32 @@ RunJournalAppendResult RunJournalWriterV1::append(const JournalCancelV1 &command
     return appendEncoded(frame);
 }
 
+std::optional<std::size_t> RunJournalWriterV1::prospectiveFrameSize(const JournalNewOrderV1 &command) const noexcept {
+    if (!usable_ ||
+        validateCommandContext(command.exchangeRunId, command.commandSequence, command.behavioralRulesVersion,
+                               command.instrumentId, command.configurationVersion) != RunJournalAppendError::NONE) {
+        return std::nullopt;
+    }
+    std::vector<std::byte> frame;
+    if (encodeNewOrderV1(command, frame) != JournalCommandCodecError::NONE) {
+        return std::nullopt;
+    }
+    return frame.size();
+}
+
+std::optional<std::size_t> RunJournalWriterV1::prospectiveFrameSize(const JournalCancelV1 &command) const noexcept {
+    if (!usable_ ||
+        validateCommandContext(command.exchangeRunId, command.commandSequence, command.behavioralRulesVersion,
+                               command.instrumentId, command.configurationVersion) != RunJournalAppendError::NONE) {
+        return std::nullopt;
+    }
+    std::vector<std::byte> frame;
+    if (encodeCancelV1(command, frame) != JournalCommandCodecError::NONE) {
+        return std::nullopt;
+    }
+    return frame.size();
+}
+
 RunJournalAppendError RunJournalWriterV1::validateCommandContext(
     const domain::ExchangeRunId exchangeRunId, const domain::CommandSequence commandSequence,
     const std::uint32_t behavioralRulesVersion, const domain::InstrumentId instrumentId,
