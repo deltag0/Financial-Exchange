@@ -14,6 +14,7 @@ public:
         : resultQueue_(resultQueue), admissionIndex_(admissionIndex) {}
 
     [[nodiscard]] bool processNext();
+    [[nodiscard]] bool processNext(matching_engine::ImmutableCommandResultBatch& completedBatch);
     [[noreturn]] void run();
 
     [[nodiscard]] bool hasPendingBatch() const noexcept;

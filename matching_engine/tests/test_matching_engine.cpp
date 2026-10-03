@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -16,21 +17,11 @@
 using namespace exchange;
 
 namespace {
-class TestableMatchingEngine : public matching_engine::MatchingEngine {
+class TestableMatchingState final : public matching_engine::MatchingState {
 public:
-    using Result = matching_engine::MatchingEngine::ProcessingResult;
-    using Outcome = matching_engine::MatchingEngine::ProcessingOutcome;
-    TestableMatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus)
-        : MatchingEngine(sequencerQueue, multicastBus, 16) {}
-    TestableMatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus,
-                           matching_engine::BoundedCommandResultQueue& commandResultQueue)
-        : MatchingEngine(sequencerQueue, multicastBus, commandResultQueue) {}
-    void invokeDrain() {
-        drainQueue(sequencerQueue, "Sequencer");
-    }
-    bool hasPendingCommandResult() const {
-        return pendingCommandResult != nullptr;
-    }
+    using Result = ProcessingResult;
+    using Outcome = ProcessingOutcome;
+
     Result invokeAddOrder(const sequencer::sequenceMessage& message) {
         return addOrder(message, message.quantity);
     }
@@ -97,41 +88,41 @@ public:
         return &*activeOrders.at(orderId).orderLocation;
     }
     bool stateIsConsistent() const {
-        std::size_t nodeCount = 0;
-        for (const auto& [instrumentId, instrumentBook] : orderBooks) {
-            const auto checkSide = [&](const auto& sideBook, sequencer::orderType side) {
-                for (const auto& [price, priceLevel] : sideBook) {
-                    if (priceLevel.orders.empty()) {
-                        return false;
-                    }
-                    uint64_t totalQuantity = 0;
-                    for (auto order = priceLevel.orders.cbegin(); order != priceLevel.orders.cend(); ++order) {
-                        ++nodeCount;
-                        totalQuantity += order->remainingQuantity.value();
-                        const auto activeOrder = activeOrders.find(order->orderId);
-                        if (activeOrder == activeOrders.end() || activeOrder->second.owner != order->owner ||
-                            activeOrder->second.instrumentId != instrumentId || activeOrder->second.side != side ||
-                            activeOrder->second.price != price ||
-                            activeOrder->second.remainingQuantity != order->remainingQuantity ||
-                            &*activeOrder->second.orderLocation != &*order) {
-                            return false;
-                        }
-                    }
-                    if (totalQuantity != priceLevel.totalQuantity.value()) {
-                        return false;
-                    }
-                }
-                return true;
-            };
-
-            if (!checkSide(instrumentBook.bids, sequencer::orderType::BUY) ||
-                !checkSide(instrumentBook.asks, sequencer::orderType::SELL)) {
-                return false;
-            }
-        }
-        return nodeCount == activeOrders.size();
+        return invariantsHold();
     }
 };
+
+class TestableMatchingEngine : public matching_engine::MatchingEngine {
+public:
+    TestableMatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus,
+                           matching_engine::MatchingState& matchingState)
+        : MatchingEngine(sequencerQueue, multicastBus, 16, matchingState) {}
+
+    TestableMatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus,
+                           matching_engine::BoundedCommandResultQueue& commandResultQueue,
+                           matching_engine::MatchingState& matchingState)
+        : MatchingEngine(sequencerQueue, multicastBus, commandResultQueue, matchingState) {}
+
+    void invokeDrain() {
+        drainQueue(sequencerQueue, "Sequencer");
+    }
+
+    bool hasPendingCommandResult() const {
+        return pendingCommandResult != nullptr;
+    }
+};
+
+const matching_engine::ActiveOrderSnapshot* findActiveOrder(const matching_engine::MatchingStateSnapshot& snapshot,
+                                                            const domain::OrderId orderId) {
+    const auto activeOrder = std::find_if(snapshot.activeOrders.begin(), snapshot.activeOrders.end(),
+                                          [orderId](const auto& order) { return order.orderId == orderId; });
+    return activeOrder == snapshot.activeOrders.end() ? nullptr : &*activeOrder;
+}
+
+bool hasActiveOrder(const matching_engine::MatchingState& state, const domain::OrderId orderId) {
+    const matching_engine::MatchingStateSnapshot snapshot = state.snapshot();
+    return findActiveOrder(snapshot, orderId) != nullptr;
+}
 
 sequencer::sequenceMessage makeOrder(uint64_t id, sequencer::orderType type, const char* symbol, uint64_t price,
                                      uint64_t quantity, core::task::TimeInForce tif,
@@ -210,7 +201,8 @@ TEST(MatchingEngineTest, ProcessOnceConsumesQueue) {
     core::Bus bus(8);
 
     // Construct the testable matching engine
-    TestableMatchingEngine engine(&seq_q, bus);
+    matching_engine::MatchingState matchingState;
+    TestableMatchingEngine engine(&seq_q, bus, matchingState);
 
     // Push a few messages
     auto m1 = makeOrder(1, sequencer::orderType::BUY, "SPY", 100, 1, core::task::TimeInForce::IOC);
@@ -230,7 +222,8 @@ TEST(MatchingEngineTest, ProcessOnceConsumesQueue) {
 TEST(MatchingEngineTest, ProcessOnceEmptyDoesNothing) {
     core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
     core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    matching_engine::MatchingState matchingState;
+    TestableMatchingEngine engine(&seq_q, bus, matchingState);
 
     // Ensure empty initially
     EXPECT_TRUE(seq_q.empty());
@@ -247,7 +240,8 @@ TEST(MatchingEngineTest, MulticastSaturationCountsOneFailureWithoutChangingMatch
     std::atomic<core::Bus::cursor_type> stalledCursor{0};
     bus.registerCursor(stalledCursor);
     matching_engine::BoundedCommandResultQueue resultQueue(2);
-    TestableMatchingEngine engine(&seq_q, bus, resultQueue);
+    matching_engine::MatchingState matchingState;
+    TestableMatchingEngine engine(&seq_q, bus, resultQueue, matchingState);
 
     const auto first = makeOrder(1, sequencer::orderType::BUY, "SPY", 100, 10, core::task::TimeInForce::GTC);
     const auto second = makeOrder(2, sequencer::orderType::BUY, "SPY", 99, 20, core::task::TimeInForce::GTC);
@@ -258,10 +252,15 @@ TEST(MatchingEngineTest, MulticastSaturationCountsOneFailureWithoutChangingMatch
 
     EXPECT_EQ(engine.multicastWriteFailures(), 1u);
     EXPECT_TRUE(seq_q.empty());
-    EXPECT_EQ(engine.activeOrderCount(), 2u);
-    EXPECT_EQ(engine.activeRemainingQuantity(domain::OrderId{1}), 10u);
-    EXPECT_EQ(engine.activeRemainingQuantity(domain::OrderId{2}), 20u);
-    EXPECT_TRUE(engine.stateIsConsistent());
+    const matching_engine::MatchingStateSnapshot state = matchingState.snapshot();
+    EXPECT_EQ(state.activeOrders.size(), 2u);
+    const matching_engine::ActiveOrderSnapshot* const firstActive = findActiveOrder(state, domain::OrderId{1});
+    const matching_engine::ActiveOrderSnapshot* const secondActive = findActiveOrder(state, domain::OrderId{2});
+    ASSERT_NE(firstActive, nullptr);
+    ASSERT_NE(secondActive, nullptr);
+    EXPECT_EQ(firstActive->remainingQuantity, domain::Quantity{10});
+    EXPECT_EQ(secondActive->remainingQuantity, domain::Quantity{20});
+    EXPECT_TRUE(matchingState.invariantsHold());
 
     matching_engine::ImmutableCommandResultBatch firstResult;
     matching_engine::ImmutableCommandResultBatch secondResult;
@@ -285,7 +284,8 @@ TEST(MatchingEngineTest, MulticastFailureCounterSupportsConcurrentDiagnosticSnap
     core::Bus bus(1);
     std::atomic<core::Bus::cursor_type> stalledCursor{0};
     bus.registerCursor(stalledCursor);
-    TestableMatchingEngine engine(&seq_q, bus);
+    matching_engine::MatchingState matchingState;
+    TestableMatchingEngine engine(&seq_q, bus, matchingState);
     auto message = makeOrder(1, sequencer::orderType::BUY, "SPY", 100, 1, core::task::TimeInForce::GTC);
     ASSERT_TRUE(bus.write(message));
     std::atomic<bool> writerDone{false};
@@ -313,14 +313,16 @@ TEST(MatchingEngineEventHandoffTest, DeliversOneCompleteImmutableBatchWithEvents
     core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
     core::Bus bus(8);
     matching_engine::BoundedCommandResultQueue resultQueue(2);
-    TestableMatchingEngine engine(&seq_q, bus, resultQueue);
-
-    ASSERT_EQ(
-        engine.invokeAddOrder(makeOrder(1, sequencer::orderType::SELL, "SPY", 99, 20, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
-    ASSERT_EQ(
-        engine.invokeAddOrder(makeOrder(2, sequencer::orderType::SELL, "SPY", 99, 30, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+    matching_engine::MatchingState matchingState;
+    ASSERT_EQ(matchingState
+                  .processCommand(makeOrder(1, sequencer::orderType::SELL, "SPY", 99, 20, core::task::TimeInForce::GTC))
+                  ->result(),
+              matching_engine::ProcessingResult::APPLIED);
+    ASSERT_EQ(matchingState
+                  .processCommand(makeOrder(2, sequencer::orderType::SELL, "SPY", 99, 30, core::task::TimeInForce::GTC))
+                  ->result(),
+              matching_engine::ProcessingResult::APPLIED);
+    TestableMatchingEngine engine(&seq_q, bus, resultQueue, matchingState);
     auto incoming = makeOrder(3, sequencer::orderType::BUY, "SPY", 100, 100, core::task::TimeInForce::IOC);
     ASSERT_TRUE(seq_q.push(incoming));
 
@@ -356,14 +358,15 @@ TEST(MatchingEngineEventHandoffTest, DeliversOneCompleteImmutableBatchWithEvents
     EXPECT_EQ(terminal->cancelledQuantity, domain::Quantity{50});
     EXPECT_TRUE(resultQueue.empty());
     EXPECT_FALSE(resultQueue.tryPop(batch));
-    EXPECT_TRUE(engine.stateIsConsistent());
+    EXPECT_TRUE(matchingState.invariantsHold());
 }
 
 TEST(MatchingEngineEventHandoffTest, NewOrderAndCancelBatchesUseExactIncomingCorrelationOnly) {
     core::SharedQueue<sequencer::sequenceMessage> seq_q(4);
     core::Bus bus(8);
     matching_engine::BoundedCommandResultQueue resultQueue(2);
-    TestableMatchingEngine engine(&seq_q, bus, resultQueue);
+    matching_engine::MatchingState matchingState;
+    TestableMatchingEngine engine(&seq_q, bus, resultQueue, matchingState);
 
     sequencer::sequenceMessage order =
         makeOrder(11, sequencer::orderType::BUY, "LEGACY", 100, 10, core::task::TimeInForce::GTC);
@@ -429,7 +432,11 @@ TEST(MatchingEngineEventHandoffTest, SaturationRetriesPendingBatchBeforeProcessi
     core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
     core::Bus bus(8);
     matching_engine::BoundedCommandResultQueue resultQueue(1);
-    TestableMatchingEngine engine(&seq_q, bus, resultQueue);
+    matching_engine::MatchingState matchingState;
+    TestableMatchingEngine engine(&seq_q, bus, resultQueue, matchingState);
+    const auto isActive = [&matchingState](const domain::OrderId orderId) {
+        return hasActiveOrder(matchingState, orderId);
+    };
 
     for (uint64_t id = 1; id <= 4; ++id) {
         auto order = makeOrder(id, sequencer::orderType::BUY, "SPY", 100 - id, 10, core::task::TimeInForce::GTC);
@@ -439,18 +446,18 @@ TEST(MatchingEngineEventHandoffTest, SaturationRetriesPendingBatchBeforeProcessi
     engine.invokeDrain();
     ASSERT_EQ(resultQueue.size(), 1u);
     ASSERT_TRUE(engine.hasPendingCommandResult());
-    EXPECT_TRUE(engine.isActive(domain::OrderId{1}));
-    EXPECT_TRUE(engine.isActive(domain::OrderId{2}));
-    EXPECT_FALSE(engine.isActive(domain::OrderId{3}));
-    EXPECT_FALSE(engine.isActive(domain::OrderId{4}));
+    EXPECT_TRUE(isActive(domain::OrderId{1}));
+    EXPECT_TRUE(isActive(domain::OrderId{2}));
+    EXPECT_FALSE(isActive(domain::OrderId{3}));
+    EXPECT_FALSE(isActive(domain::OrderId{4}));
     EXPECT_FALSE(seq_q.empty());
 
     engine.invokeDrain();
     engine.invokeDrain();
     EXPECT_EQ(resultQueue.size(), 1u);
     EXPECT_TRUE(engine.hasPendingCommandResult());
-    EXPECT_FALSE(engine.isActive(domain::OrderId{3}));
-    EXPECT_FALSE(engine.isActive(domain::OrderId{4}));
+    EXPECT_FALSE(isActive(domain::OrderId{3}));
+    EXPECT_FALSE(isActive(domain::OrderId{4}));
 
     std::vector<uint64_t> deliveredCommandSequences;
     const auto popBatch = [&]() {
@@ -466,16 +473,16 @@ TEST(MatchingEngineEventHandoffTest, SaturationRetriesPendingBatchBeforeProcessi
     engine.invokeDrain();
     ASSERT_EQ(resultQueue.size(), 1u);
     EXPECT_TRUE(engine.hasPendingCommandResult());
-    EXPECT_TRUE(engine.isActive(domain::OrderId{3}));
-    EXPECT_FALSE(engine.isActive(domain::OrderId{4}));
+    EXPECT_TRUE(isActive(domain::OrderId{3}));
+    EXPECT_FALSE(isActive(domain::OrderId{4}));
 
     engine.invokeDrain();
-    EXPECT_FALSE(engine.isActive(domain::OrderId{4}));
+    EXPECT_FALSE(isActive(domain::OrderId{4}));
     popBatch();
     engine.invokeDrain();
     ASSERT_EQ(resultQueue.size(), 1u);
     EXPECT_TRUE(engine.hasPendingCommandResult());
-    EXPECT_TRUE(engine.isActive(domain::OrderId{4}));
+    EXPECT_TRUE(isActive(domain::OrderId{4}));
 
     popBatch();
     engine.invokeDrain();
@@ -490,21 +497,19 @@ TEST(MatchingEngineEventHandoffTest, SaturationRetriesPendingBatchBeforeProcessi
     matching_engine::ImmutableCommandResultBatch duplicate;
     EXPECT_FALSE(resultQueue.tryPop(duplicate));
     EXPECT_EQ(deliveredCommandSequences, (std::vector<uint64_t>{1, 2, 3, 4}));
-    EXPECT_EQ(engine.activeOrderCount(), 4u);
-    EXPECT_TRUE(engine.stateIsConsistent());
+    EXPECT_EQ(matchingState.snapshot().activeOrders.size(), 4u);
+    EXPECT_TRUE(matchingState.invariantsHold());
 }
 
 TEST(MatchingEngineTest, UnsupportedTimeInForceIsInvariantFailureWithoutMutationForBothSides) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(1, sequencer::orderType::SELL, "SPY", 110, 100, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(2, sequencer::orderType::BUY, "SPY", 90, 100, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
 
     constexpr std::array unsupported{core::task::TimeInForce::DAY, core::task::TimeInForce::FOK,
                                      core::task::TimeInForce::GTD, core::task::TimeInForce::GTX,
@@ -530,9 +535,7 @@ TEST_P(MatchingEngineEventLimitTest, EnforcesExactResultBoundBeforeStateMutation
     constexpr std::size_t MAX_EVENTS_PER_COMMAND = 4'096;
     constexpr uint64_t PRICE = 100;
 
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     const EventLimitCase testCase = GetParam();
     const sequencer::orderType makerSide =
@@ -541,7 +544,7 @@ TEST_P(MatchingEngineEventLimitTest, EnforcesExactResultBoundBeforeStateMutation
     for (std::size_t index = 0; index < restingOrderCount; ++index) {
         const uint64_t orderId = static_cast<uint64_t>(index + 1);
         ASSERT_EQ(engine.invokeAddOrder(makeOrder(orderId, makerSide, "SPY", PRICE, 1, core::task::TimeInForce::GTC)),
-                  TestableMatchingEngine::Result::APPLIED)
+                  TestableMatchingState::Result::APPLIED)
             << "resting order " << orderId;
     }
 
@@ -551,12 +554,12 @@ TEST_P(MatchingEngineEventLimitTest, EnforcesExactResultBoundBeforeStateMutation
     const uint64_t incomingOrderId = static_cast<uint64_t>(restingOrderCount + 1);
     const auto incoming = makeOrder(incomingOrderId, testCase.takerSide, "SPY", PRICE,
                                     static_cast<uint64_t>(testCase.plannedEventCount), core::task::TimeInForce::IOC);
-    const TestableMatchingEngine::Outcome outcome = testCase.takerSide == sequencer::orderType::BUY
-                                                        ? engine.invokeProcessBuyOrder(incoming)
-                                                        : engine.invokeProcessSellOrder(incoming);
+    const TestableMatchingState::Outcome outcome = testCase.takerSide == sequencer::orderType::BUY
+                                                       ? engine.invokeProcessBuyOrder(incoming)
+                                                       : engine.invokeProcessSellOrder(incoming);
 
     if (testCase.plannedEventCount <= MAX_EVENTS_PER_COMMAND) {
-        ASSERT_EQ(outcome.result, TestableMatchingEngine::Result::APPLIED);
+        ASSERT_EQ(outcome.result, TestableMatchingState::Result::APPLIED);
         ASSERT_EQ(outcome.events.size(), testCase.plannedEventCount);
         for (std::size_t index = 0; index < restingOrderCount; ++index) {
             const auto* trade = std::get_if<domain::Trade>(&outcome.events[index]);
@@ -583,7 +586,7 @@ TEST_P(MatchingEngineEventLimitTest, EnforcesExactResultBoundBeforeStateMutation
         EXPECT_FALSE(engine.hasInstrument(domain::InstrumentId{1}));
         EXPECT_EQ(engine.activeOrderCount(), 0u);
     } else {
-        ASSERT_EQ(outcome.result, TestableMatchingEngine::Result::BOOK_CAPACITY_EXCEEDED);
+        ASSERT_EQ(outcome.result, TestableMatchingState::Result::BOOK_CAPACITY_EXCEEDED);
         ASSERT_EQ(outcome.events.size(), 1u);
         const auto* rejection = std::get_if<domain::CommandRejected>(&outcome.events.front());
         ASSERT_NE(rejection, nullptr);
@@ -626,15 +629,13 @@ INSTANTIATE_TEST_SUITE_P(BuyAndSellBoundaries, MatchingEngineEventLimitTest,
                          eventLimitCaseName);
 
 TEST(MatchingEngineTest, PartialFillUpdatesNodeAggregateAndActiveIndex) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     auto restingSell = makeOrder(1, sequencer::orderType::SELL, "SPY", 100, 100, core::task::TimeInForce::GTC);
     engine.invokeAddOrder(restingSell);
 
     auto buy = makeOrder(2, sequencer::orderType::BUY, "SPY", 100, 40, core::task::TimeInForce::IOC);
-    EXPECT_EQ(engine.invokeProcessBuyOrder(buy).result, TestableMatchingEngine::Result::APPLIED);
+    EXPECT_EQ(engine.invokeProcessBuyOrder(buy).result, TestableMatchingState::Result::APPLIED);
 
     EXPECT_EQ(buy.quantity.value(), 40);
     EXPECT_EQ(engine.bestSellQuantity(domain::InstrumentId{1}), 60);
@@ -645,43 +646,39 @@ TEST(MatchingEngineTest, PartialFillUpdatesNodeAggregateAndActiveIndex) {
 }
 
 TEST(MatchingEngineTest, PriceLevelAggregateAcceptsMaximumAndRejectsNextUnit) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     for (uint64_t id = 1; id <= 10; ++id) {
         const auto order =
             makeOrder(id, sequencer::orderType::BUY, "SPY", 100, 100000000, core::task::TimeInForce::GTC);
-        EXPECT_EQ(engine.invokeAddOrder(order), TestableMatchingEngine::Result::APPLIED);
+        EXPECT_EQ(engine.invokeAddOrder(order), TestableMatchingState::Result::APPLIED);
     }
     EXPECT_EQ(engine.bestBuyLevelQuantity(domain::InstrumentId{1}), 1000000000u);
 
     const auto excess = makeOrder(11, sequencer::orderType::BUY, "SPY", 100, 1, core::task::TimeInForce::GTC);
-    EXPECT_EQ(engine.invokeAddOrder(excess), TestableMatchingEngine::Result::BOOK_CAPACITY_EXCEEDED);
+    EXPECT_EQ(engine.invokeAddOrder(excess), TestableMatchingState::Result::BOOK_CAPACITY_EXCEEDED);
     EXPECT_EQ(engine.bestBuyLevelQuantity(domain::InstrumentId{1}), 1000000000u);
     EXPECT_TRUE(engine.stateIsConsistent());
 }
 
 TEST(MatchingEngineTest, AggregatePreflightRejectsCrossingGtcWithoutPartialMutation) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     for (uint64_t id = 1; id <= 9; ++id) {
         const auto order =
             makeOrder(id, sequencer::orderType::BUY, "SPY", 100, 100000000, core::task::TimeInForce::GTC);
-        ASSERT_EQ(engine.invokeAddOrder(order), TestableMatchingEngine::Result::APPLIED);
+        ASSERT_EQ(engine.invokeAddOrder(order), TestableMatchingState::Result::APPLIED);
     }
     const auto finalBuy = makeOrder(10, sequencer::orderType::BUY, "SPY", 100, 99999999, core::task::TimeInForce::GTC);
-    ASSERT_EQ(engine.invokeAddOrder(finalBuy), TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(engine.invokeAddOrder(finalBuy), TestableMatchingState::Result::APPLIED);
 
     const auto restingSell = makeOrder(11, sequencer::orderType::SELL, "SPY", 100, 1, core::task::TimeInForce::GTC);
-    ASSERT_EQ(engine.invokeAddOrder(restingSell), TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(engine.invokeAddOrder(restingSell), TestableMatchingState::Result::APPLIED);
 
     auto incomingBuy = makeOrder(12, sequencer::orderType::BUY, "SPY", 100, 3, core::task::TimeInForce::GTC);
-    const TestableMatchingEngine::Outcome outcome = engine.invokeProcessBuyOrder(incomingBuy);
+    const TestableMatchingState::Outcome outcome = engine.invokeProcessBuyOrder(incomingBuy);
 
-    ASSERT_EQ(outcome.result, TestableMatchingEngine::Result::BOOK_CAPACITY_EXCEEDED);
+    ASSERT_EQ(outcome.result, TestableMatchingState::Result::BOOK_CAPACITY_EXCEEDED);
     ASSERT_EQ(outcome.events.size(), 1u);
     const auto* rejection = std::get_if<domain::CommandRejected>(&outcome.events.front());
     ASSERT_NE(rejection, nullptr);
@@ -701,15 +698,13 @@ TEST(MatchingEngineTest, AggregatePreflightRejectsCrossingGtcWithoutPartialMutat
 }
 
 TEST(MatchingEngineTest, FullFillRemovesOrderLevelInstrumentAndActiveIndexEntry) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     const auto restingSell = makeOrder(1, sequencer::orderType::SELL, "SPY", 100, 100, core::task::TimeInForce::GTC);
-    ASSERT_EQ(engine.invokeAddOrder(restingSell), TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(engine.invokeAddOrder(restingSell), TestableMatchingState::Result::APPLIED);
 
     auto incomingBuy = makeOrder(2, sequencer::orderType::BUY, "SPY", 100, 100, core::task::TimeInForce::IOC);
-    ASSERT_EQ(engine.invokeProcessBuyOrder(incomingBuy).result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(engine.invokeProcessBuyOrder(incomingBuy).result, TestableMatchingState::Result::APPLIED);
 
     EXPECT_EQ(incomingBuy.quantity.value(), 100u);
     EXPECT_FALSE(engine.isActive(domain::OrderId{1}));
@@ -718,21 +713,19 @@ TEST(MatchingEngineTest, FullFillRemovesOrderLevelInstrumentAndActiveIndexEntry)
 }
 
 TEST(MatchingEngineTest, SamePriceOrdersKeepStableFifoPriority) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     const auto firstSell = makeOrder(1, sequencer::orderType::SELL, "SPY", 100, 100, core::task::TimeInForce::GTC);
     const auto secondSell = makeOrder(2, sequencer::orderType::SELL, "SPY", 100, 100, core::task::TimeInForce::GTC);
-    ASSERT_EQ(engine.invokeAddOrder(firstSell), TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(engine.invokeAddOrder(firstSell), TestableMatchingState::Result::APPLIED);
     const auto* firstLocation = engine.activeOrderLocation(domain::OrderId{1});
-    ASSERT_EQ(engine.invokeAddOrder(secondSell), TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(engine.invokeAddOrder(secondSell), TestableMatchingState::Result::APPLIED);
 
     EXPECT_EQ(engine.activeOrderLocation(domain::OrderId{1}), firstLocation);
     EXPECT_EQ(engine.bestSellOrderId(domain::InstrumentId{1}), domain::OrderId{1});
 
     auto incomingBuy = makeOrder(3, sequencer::orderType::BUY, "SPY", 100, 120, core::task::TimeInForce::IOC);
-    ASSERT_EQ(engine.invokeProcessBuyOrder(incomingBuy).result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(engine.invokeProcessBuyOrder(incomingBuy).result, TestableMatchingState::Result::APPLIED);
 
     EXPECT_EQ(incomingBuy.quantity.value(), 120u);
     EXPECT_FALSE(engine.isActive(domain::OrderId{1}));
@@ -744,22 +737,20 @@ TEST(MatchingEngineTest, SamePriceOrdersKeepStableFifoPriority) {
 }
 
 TEST(MatchingEngineTest, AggregatesEqualRemainingQuantitiesAcrossLevelsAfterFills) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(1, sequencer::orderType::SELL, "SPY", 100, 30, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(2, sequencer::orderType::SELL, "SPY", 100, 40, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(3, sequencer::orderType::SELL, "SPY", 101, 50, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
 
     auto incomingBuy = makeOrder(4, sequencer::orderType::BUY, "SPY", 101, 45, core::task::TimeInForce::IOC);
-    ASSERT_EQ(engine.invokeProcessBuyOrder(incomingBuy).result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(engine.invokeProcessBuyOrder(incomingBuy).result, TestableMatchingState::Result::APPLIED);
 
     EXPECT_FALSE(engine.isActive(domain::OrderId{1}));
     EXPECT_EQ(engine.activeRemainingQuantity(domain::OrderId{2}), 25u);
@@ -770,18 +761,16 @@ TEST(MatchingEngineTest, AggregatesEqualRemainingQuantitiesAcrossLevelsAfterFill
 }
 
 TEST(MatchingEngineTest, InstrumentIdIsAuthoritativeForMatchingAndSymbolsDoNotCrossBooks) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     const auto restingSell = makeOrder(1, sequencer::orderType::SELL, "LEGACY", 100, 50, core::task::TimeInForce::GTC,
                                        domain::InstrumentId{1});
-    ASSERT_EQ(engine.invokeAddOrder(restingSell), TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(engine.invokeAddOrder(restingSell), TestableMatchingState::Result::APPLIED);
 
     auto otherInstrumentBuy = makeOrder(2, sequencer::orderType::BUY, "LEGACY", 100, 50, core::task::TimeInForce::IOC,
                                         domain::InstrumentId{2});
     const auto isolatedOutcome = engine.invokeProcessBuyOrder(otherInstrumentBuy);
-    ASSERT_EQ(isolatedOutcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(isolatedOutcome.result, TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(isolatedOutcome.events.size(), 1u);
     EXPECT_NE(std::get_if<domain::OrderCancelled>(&isolatedOutcome.events.front()), nullptr);
     EXPECT_EQ(otherInstrumentBuy.quantity.value(), 50u);
@@ -789,20 +778,18 @@ TEST(MatchingEngineTest, InstrumentIdIsAuthoritativeForMatchingAndSymbolsDoNotCr
 
     auto sameInstrumentBuy = makeOrder(3, sequencer::orderType::BUY, "RENAMED", 100, 50, core::task::TimeInForce::IOC,
                                        domain::InstrumentId{1});
-    ASSERT_EQ(engine.invokeProcessBuyOrder(sameInstrumentBuy).result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(engine.invokeProcessBuyOrder(sameInstrumentBuy).result, TestableMatchingState::Result::APPLIED);
     EXPECT_EQ(sameInstrumentBuy.quantity.value(), 50u);
     EXPECT_FALSE(engine.isActive(domain::OrderId{1}));
     EXPECT_TRUE(engine.stateIsConsistent());
 }
 
 TEST(MatchingEngineTest, DuplicateActiveAuthoritativeOrderIdIsInvariantFailure) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     const auto first = makeOrder(1, sequencer::orderType::SELL, "SPY", 100, 50, core::task::TimeInForce::GTC);
     const auto duplicate = makeOrder(1, sequencer::orderType::BUY, "SPY", 101, 25, core::task::TimeInForce::GTC);
-    ASSERT_EQ(engine.invokeAddOrder(first), TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(engine.invokeAddOrder(first), TestableMatchingState::Result::APPLIED);
 
     EXPECT_THROW(engine.invokeAddOrder(duplicate), std::logic_error);
     EXPECT_EQ(engine.activeRemainingQuantity(domain::OrderId{1}), 50u);
@@ -810,27 +797,25 @@ TEST(MatchingEngineTest, DuplicateActiveAuthoritativeOrderIdIsInvariantFailure) 
 }
 
 TEST(MatchingEngineTest, BuyMatchesBestAskThenFifoAndEmitsExactMakerPriceTrades) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(1, sequencer::orderType::SELL, "SPY", 101, 30, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(2, sequencer::orderType::SELL, "SPY", 100, 40, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(3, sequencer::orderType::SELL, "SPY", 100, 50, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(4, sequencer::orderType::SELL, "SPY", 102, 25, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
 
     const auto incomingBuy = makeOrder(10, sequencer::orderType::BUY, "SPY", 101, 100, core::task::TimeInForce::IOC);
-    const TestableMatchingEngine::Outcome outcome = engine.invokeProcessBuyOrder(incomingBuy);
+    const TestableMatchingState::Outcome outcome = engine.invokeProcessBuyOrder(incomingBuy);
 
-    ASSERT_EQ(outcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(outcome.result, TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(outcome.events.size(), 3u);
     const auto* firstTrade = std::get_if<domain::Trade>(&outcome.events[0]);
     const auto* secondTrade = std::get_if<domain::Trade>(&outcome.events[1]);
@@ -891,27 +876,25 @@ TEST(MatchingEngineTest, BuyMatchesBestAskThenFifoAndEmitsExactMakerPriceTrades)
 }
 
 TEST(MatchingEngineTest, SellMatchesBestBidThenFifoAndEmitsExactMakerPriceTrades) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(1, sequencer::orderType::BUY, "SPY", 99, 30, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(2, sequencer::orderType::BUY, "SPY", 101, 40, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(3, sequencer::orderType::BUY, "SPY", 101, 50, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(4, sequencer::orderType::BUY, "SPY", 98, 25, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
 
     const auto incomingSell = makeOrder(10, sequencer::orderType::SELL, "SPY", 99, 100, core::task::TimeInForce::IOC);
-    const TestableMatchingEngine::Outcome outcome = engine.invokeProcessSellOrder(incomingSell);
+    const TestableMatchingState::Outcome outcome = engine.invokeProcessSellOrder(incomingSell);
 
-    ASSERT_EQ(outcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(outcome.result, TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(outcome.events.size(), 3u);
     const auto* firstTrade = std::get_if<domain::Trade>(&outcome.events[0]);
     const auto* secondTrade = std::get_if<domain::Trade>(&outcome.events[1]);
@@ -972,18 +955,16 @@ TEST(MatchingEngineTest, SellMatchesBestBidThenFifoAndEmitsExactMakerPriceTrades
 }
 
 TEST(MatchingEngineTest, SellGtcRemainderRestsWithPostTradeQuantity) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(1, sequencer::orderType::BUY, "SPY", 101, 40, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     const auto incomingSell = makeOrder(2, sequencer::orderType::SELL, "SPY", 100, 100, core::task::TimeInForce::GTC);
 
-    const TestableMatchingEngine::Outcome outcome = engine.invokeProcessSellOrder(incomingSell);
+    const TestableMatchingState::Outcome outcome = engine.invokeProcessSellOrder(incomingSell);
 
-    ASSERT_EQ(outcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(outcome.result, TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(outcome.events.size(), 2u);
     const auto* trade = std::get_if<domain::Trade>(&outcome.events.front());
     const auto* rested = std::get_if<domain::OrderRested>(&outcome.events[1]);
@@ -1011,18 +992,16 @@ TEST(MatchingEngineTest, SellGtcRemainderRestsWithPostTradeQuantity) {
 }
 
 TEST(MatchingEngineTest, BuyGtcRemainderRestsWithPostTradeQuantity) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(1, sequencer::orderType::SELL, "SPY", 99, 40, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     const auto incomingBuy = makeOrder(2, sequencer::orderType::BUY, "SPY", 100, 100, core::task::TimeInForce::GTC);
 
-    const TestableMatchingEngine::Outcome outcome = engine.invokeProcessBuyOrder(incomingBuy);
+    const TestableMatchingState::Outcome outcome = engine.invokeProcessBuyOrder(incomingBuy);
 
-    ASSERT_EQ(outcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(outcome.result, TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(outcome.events.size(), 2u);
     const auto* trade = std::get_if<domain::Trade>(&outcome.events.front());
     const auto* rested = std::get_if<domain::OrderRested>(&outcome.events[1]);
@@ -1050,18 +1029,16 @@ TEST(MatchingEngineTest, BuyGtcRemainderRestsWithPostTradeQuantity) {
 }
 
 TEST(MatchingEngineTest, SelfTradingIsAllowedAndIocRemainderDoesNotRest) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     const auto restingBuy = makeOrder(1, sequencer::orderType::BUY, "SPY", 100, 50, core::task::TimeInForce::GTC);
-    ASSERT_EQ(engine.invokeAddOrder(restingBuy), TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(engine.invokeAddOrder(restingBuy), TestableMatchingState::Result::APPLIED);
     auto incomingSell = makeOrder(2, sequencer::orderType::SELL, "SPY", 100, 70, core::task::TimeInForce::IOC);
     incomingSell.clientId = restingBuy.clientId;
 
-    const TestableMatchingEngine::Outcome outcome = engine.invokeProcessSellOrder(incomingSell);
+    const TestableMatchingState::Outcome outcome = engine.invokeProcessSellOrder(incomingSell);
 
-    ASSERT_EQ(outcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(outcome.result, TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(outcome.events.size(), 2u);
     const auto* trade = std::get_if<domain::Trade>(&outcome.events.front());
     const auto* cancelled = std::get_if<domain::OrderCancelled>(&outcome.events[1]);
@@ -1086,24 +1063,22 @@ TEST(MatchingEngineTest, SelfTradingIsAllowedAndIocRemainderDoesNotRest) {
 }
 
 TEST(MatchingEngineTest, SellMatchingIsIsolatedByInstrumentIdAndIgnoresLegacySymbolText) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     const auto restingBuy = makeOrder(1, sequencer::orderType::BUY, "LEGACY", 100, 50, core::task::TimeInForce::GTC,
                                       domain::InstrumentId{1});
-    ASSERT_EQ(engine.invokeAddOrder(restingBuy), TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(engine.invokeAddOrder(restingBuy), TestableMatchingState::Result::APPLIED);
 
     const auto otherInstrumentSell = makeOrder(2, sequencer::orderType::SELL, "LEGACY", 100, 50,
                                                core::task::TimeInForce::IOC, domain::InstrumentId{2});
-    const TestableMatchingEngine::Outcome isolatedOutcome = engine.invokeProcessSellOrder(otherInstrumentSell);
+    const TestableMatchingState::Outcome isolatedOutcome = engine.invokeProcessSellOrder(otherInstrumentSell);
     ASSERT_EQ(isolatedOutcome.events.size(), 1u);
     EXPECT_NE(std::get_if<domain::OrderCancelled>(&isolatedOutcome.events.front()), nullptr);
     EXPECT_EQ(engine.activeRemainingQuantity(domain::OrderId{1}), 50u);
 
     const auto sameInstrumentSell = makeOrder(3, sequencer::orderType::SELL, "RENAMED", 100, 50,
                                               core::task::TimeInForce::IOC, domain::InstrumentId{1});
-    const TestableMatchingEngine::Outcome matchingOutcome = engine.invokeProcessSellOrder(sameInstrumentSell);
+    const TestableMatchingState::Outcome matchingOutcome = engine.invokeProcessSellOrder(sameInstrumentSell);
     ASSERT_EQ(matchingOutcome.events.size(), 1u);
     EXPECT_NE(std::get_if<domain::Trade>(&matchingOutcome.events.front()), nullptr);
     EXPECT_FALSE(engine.isActive(domain::OrderId{1}));
@@ -1111,13 +1086,11 @@ TEST(MatchingEngineTest, SellMatchingIsIsolatedByInstrumentIdAndIgnoresLegacySym
 }
 
 TEST(MatchingEngineTest, UnmatchedGtcOrdersRestAndEmitExactTerminalEventsForBothSides) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     const auto buy = makeOrder(1, sequencer::orderType::BUY, "SPY", 99, 25, core::task::TimeInForce::GTC);
-    const TestableMatchingEngine::Outcome buyOutcome = engine.invokeProcessBuyOrder(buy);
-    ASSERT_EQ(buyOutcome.result, TestableMatchingEngine::Result::APPLIED);
+    const TestableMatchingState::Outcome buyOutcome = engine.invokeProcessBuyOrder(buy);
+    ASSERT_EQ(buyOutcome.result, TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(buyOutcome.events.size(), 1u);
     const auto* buyRested = std::get_if<domain::OrderRested>(&buyOutcome.events.front());
     ASSERT_NE(buyRested, nullptr);
@@ -1132,8 +1105,8 @@ TEST(MatchingEngineTest, UnmatchedGtcOrdersRestAndEmitExactTerminalEventsForBoth
                           }));
 
     const auto sell = makeOrder(2, sequencer::orderType::SELL, "SPY", 101, 30, core::task::TimeInForce::GTC);
-    const TestableMatchingEngine::Outcome sellOutcome = engine.invokeProcessSellOrder(sell);
-    ASSERT_EQ(sellOutcome.result, TestableMatchingEngine::Result::APPLIED);
+    const TestableMatchingState::Outcome sellOutcome = engine.invokeProcessSellOrder(sell);
+    ASSERT_EQ(sellOutcome.result, TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(sellOutcome.events.size(), 1u);
     const auto* sellRested = std::get_if<domain::OrderRested>(&sellOutcome.events.front());
     ASSERT_NE(sellRested, nullptr);
@@ -1157,13 +1130,11 @@ TEST(MatchingEngineTest, UnmatchedGtcOrdersRestAndEmitExactTerminalEventsForBoth
 }
 
 TEST(MatchingEngineTest, UnmatchedIocOrdersCancelExactlyAndNeverRestForBothSides) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     const auto buy = makeOrder(1, sequencer::orderType::BUY, "SPY", 99, 25, core::task::TimeInForce::IOC);
-    const TestableMatchingEngine::Outcome buyOutcome = engine.invokeProcessBuyOrder(buy);
-    ASSERT_EQ(buyOutcome.result, TestableMatchingEngine::Result::APPLIED);
+    const TestableMatchingState::Outcome buyOutcome = engine.invokeProcessBuyOrder(buy);
+    ASSERT_EQ(buyOutcome.result, TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(buyOutcome.events.size(), 1u);
     const auto* buyCancelled = std::get_if<domain::OrderCancelled>(&buyOutcome.events.front());
     ASSERT_NE(buyCancelled, nullptr);
@@ -1177,8 +1148,8 @@ TEST(MatchingEngineTest, UnmatchedIocOrdersCancelExactlyAndNeverRestForBothSides
                              }));
 
     const auto sell = makeOrder(2, sequencer::orderType::SELL, "SPY", 101, 30, core::task::TimeInForce::IOC);
-    const TestableMatchingEngine::Outcome sellOutcome = engine.invokeProcessSellOrder(sell);
-    ASSERT_EQ(sellOutcome.result, TestableMatchingEngine::Result::APPLIED);
+    const TestableMatchingState::Outcome sellOutcome = engine.invokeProcessSellOrder(sell);
+    ASSERT_EQ(sellOutcome.result, TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(sellOutcome.events.size(), 1u);
     const auto* sellCancelled = std::get_if<domain::OrderCancelled>(&sellOutcome.events.front());
     ASSERT_NE(sellCancelled, nullptr);
@@ -1200,20 +1171,18 @@ TEST(MatchingEngineTest, UnmatchedIocOrdersCancelExactlyAndNeverRestForBothSides
 }
 
 TEST(MatchingEngineTest, BuyIocPartialFillEmitsTradeThenExactCancellation) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(1, sequencer::orderType::SELL, "SPY", 99, 20, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(2, sequencer::orderType::SELL, "SPY", 99, 30, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     const auto incomingBuy = makeOrder(3, sequencer::orderType::BUY, "SPY", 100, 100, core::task::TimeInForce::IOC);
-    const TestableMatchingEngine::Outcome outcome = engine.invokeProcessBuyOrder(incomingBuy);
+    const TestableMatchingState::Outcome outcome = engine.invokeProcessBuyOrder(incomingBuy);
 
-    ASSERT_EQ(outcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(outcome.result, TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(outcome.events.size(), 3u);
     const auto* firstTrade = std::get_if<domain::Trade>(&outcome.events[0]);
     const auto* secondTrade = std::get_if<domain::Trade>(&outcome.events[1]);
@@ -1245,12 +1214,10 @@ TEST(MatchingEngineTest, BuyIocPartialFillEmitsTradeThenExactCancellation) {
 
 TEST(MatchingEngineTest, FullyFilledGtcOrdersEmitOnlyTradesForBothSides) {
     {
-        core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-        core::Bus bus(8);
-        TestableMatchingEngine engine(&seq_q, bus);
+        TestableMatchingState engine;
         ASSERT_EQ(engine.invokeAddOrder(
                       makeOrder(1, sequencer::orderType::SELL, "SPY", 99, 40, core::task::TimeInForce::GTC)),
-                  TestableMatchingEngine::Result::APPLIED);
+                  TestableMatchingState::Result::APPLIED);
         const auto buy = makeOrder(2, sequencer::orderType::BUY, "SPY", 100, 40, core::task::TimeInForce::GTC);
         const auto outcome = engine.invokeProcessBuyOrder(buy);
         ASSERT_EQ(outcome.events.size(), 1u);
@@ -1261,12 +1228,10 @@ TEST(MatchingEngineTest, FullyFilledGtcOrdersEmitOnlyTradesForBothSides) {
         EXPECT_TRUE(engine.stateIsConsistent());
     }
     {
-        core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-        core::Bus bus(8);
-        TestableMatchingEngine engine(&seq_q, bus);
+        TestableMatchingState engine;
         ASSERT_EQ(engine.invokeAddOrder(
                       makeOrder(1, sequencer::orderType::BUY, "SPY", 101, 40, core::task::TimeInForce::GTC)),
-                  TestableMatchingEngine::Result::APPLIED);
+                  TestableMatchingState::Result::APPLIED);
         const auto sell = makeOrder(2, sequencer::orderType::SELL, "SPY", 100, 40, core::task::TimeInForce::GTC);
         const auto outcome = engine.invokeProcessSellOrder(sell);
         ASSERT_EQ(outcome.events.size(), 1u);
@@ -1279,26 +1244,24 @@ TEST(MatchingEngineTest, FullyFilledGtcOrdersEmitOnlyTradesForBothSides) {
 }
 
 TEST(MatchingEngineTest, SellCapacityPreflightRejectsBeforeCrossingBidMutation) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     for (uint64_t id = 1; id <= 9; ++id) {
         const auto order =
             makeOrder(id, sequencer::orderType::SELL, "SPY", 100, 100000000, core::task::TimeInForce::GTC);
-        ASSERT_EQ(engine.invokeAddOrder(order), TestableMatchingEngine::Result::APPLIED);
+        ASSERT_EQ(engine.invokeAddOrder(order), TestableMatchingState::Result::APPLIED);
     }
     ASSERT_EQ(engine.invokeAddOrder(
                   makeOrder(10, sequencer::orderType::SELL, "SPY", 100, 99999999, core::task::TimeInForce::GTC)),
-              TestableMatchingEngine::Result::APPLIED);
+              TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(11, sequencer::orderType::BUY, "SPY", 101, 1, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
 
     const auto incomingSell = makeOrder(12, sequencer::orderType::SELL, "SPY", 100, 3, core::task::TimeInForce::GTC);
-    const TestableMatchingEngine::Outcome outcome = engine.invokeProcessSellOrder(incomingSell);
+    const TestableMatchingState::Outcome outcome = engine.invokeProcessSellOrder(incomingSell);
 
-    ASSERT_EQ(outcome.result, TestableMatchingEngine::Result::BOOK_CAPACITY_EXCEEDED);
+    ASSERT_EQ(outcome.result, TestableMatchingState::Result::BOOK_CAPACITY_EXCEEDED);
     ASSERT_EQ(outcome.events.size(), 1u);
     const auto* rejection = std::get_if<domain::CommandRejected>(&outcome.events.front());
     ASSERT_NE(rejection, nullptr);
@@ -1313,20 +1276,18 @@ TEST(MatchingEngineTest, SellCapacityPreflightRejectsBeforeCrossingBidMutation) 
 }
 
 TEST(MatchingEngineCancellationTest, SuccessfulBuyAndSellCancellationEmitExactEventsAndCleanEmptyState) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(1, sequencer::orderType::BUY, "SPY", 99, 40, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(2, sequencer::orderType::SELL, "SPY", 101, 60, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
 
     const auto cancelBuy = makeCancel(3, 1001, 1);
     const auto buyOutcome = engine.invokeProcessCancel(cancelBuy);
-    ASSERT_EQ(buyOutcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(buyOutcome.result, TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(buyOutcome.events.size(), 1u);
     const auto* buyCancelled = std::get_if<domain::OrderCancelled>(&buyOutcome.events.front());
     ASSERT_NE(buyCancelled, nullptr);
@@ -1345,7 +1306,7 @@ TEST(MatchingEngineCancellationTest, SuccessfulBuyAndSellCancellationEmitExactEv
 
     const auto cancelSell = makeCancel(4, 1002, 2);
     const auto sellOutcome = engine.invokeProcessCancel(cancelSell);
-    ASSERT_EQ(sellOutcome.result, TestableMatchingEngine::Result::APPLIED);
+    ASSERT_EQ(sellOutcome.result, TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(sellOutcome.events.size(), 1u);
     const auto* sellCancelled = std::get_if<domain::OrderCancelled>(&sellOutcome.events.front());
     ASSERT_NE(sellCancelled, nullptr);
@@ -1363,19 +1324,17 @@ TEST(MatchingEngineCancellationTest, SuccessfulBuyAndSellCancellationEmitExactEv
 }
 
 TEST(MatchingEngineCancellationTest, CancellingMiddleSellPreservesUnaffectedFifoAndAggregate) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(1, sequencer::orderType::SELL, "SPY", 100, 40, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(2, sequencer::orderType::SELL, "SPY", 100, 50, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(3, sequencer::orderType::SELL, "SPY", 100, 30, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     const auto* firstLocation = engine.activeOrderLocation(domain::OrderId{1});
     const auto* thirdLocation = engine.activeOrderLocation(domain::OrderId{3});
 
@@ -1405,13 +1364,11 @@ TEST(MatchingEngineCancellationTest, CancellingMiddleSellPreservesUnaffectedFifo
 }
 
 TEST(MatchingEngineCancellationTest, PartialFillCancellationUsesExactCurrentRemainder) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(1, sequencer::orderType::BUY, "SPY", 100, 100, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     const auto sell = makeOrder(2, sequencer::orderType::SELL, "SPY", 100, 40, core::task::TimeInForce::IOC);
     ASSERT_EQ(engine.invokeProcessSellOrder(sell).events.size(), 1u);
     ASSERT_EQ(engine.activeRemainingQuantity(domain::OrderId{1}), 60u);
@@ -1438,16 +1395,14 @@ TEST(MatchingEngineCancellationTest, PartialFillCancellationUsesExactCurrentRema
 }
 
 TEST(MatchingEngineCancellationTest, MissingAndNotOwnerRejectionsAreExactAndLeaveBookUnchanged) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(1, sequencer::orderType::BUY, "SPY", 100, 40, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(2, sequencer::orderType::BUY, "SPY", 100, 50, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     const auto* firstLocation = engine.activeOrderLocation(domain::OrderId{1});
     const auto* secondLocation = engine.activeOrderLocation(domain::OrderId{2});
 
@@ -1485,13 +1440,11 @@ TEST(MatchingEngineCancellationTest, MissingAndNotOwnerRejectionsAreExactAndLeav
 }
 
 TEST(MatchingEngineCancellationTest, TerminalTargetsReturnOrderNotActive) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(1, sequencer::orderType::SELL, "SPY", 100, 25, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     ASSERT_EQ(engine
                   .invokeProcessBuyOrder(
                       makeOrder(2, sequencer::orderType::BUY, "SPY", 100, 25, core::task::TimeInForce::IOC))
@@ -1504,7 +1457,7 @@ TEST(MatchingEngineCancellationTest, TerminalTargetsReturnOrderNotActive) {
 
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(4, sequencer::orderType::BUY, "SPY", 90, 15, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
     const auto initialCancelOutcome = engine.invokeProcessCancel(makeCancel(5, 1004, 4));
     ASSERT_NE(std::get_if<domain::OrderCancelled>(&initialCancelOutcome.events.front()), nullptr);
 
@@ -1522,18 +1475,16 @@ TEST(MatchingEngineCancellationTest, TerminalTargetsReturnOrderNotActive) {
 }
 
 TEST(MatchingEngineCancellationTest, CapacityRejectedTargetIsNotActive) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
 
     for (uint64_t id = 1; id <= 10; ++id) {
         ASSERT_EQ(engine.invokeAddOrder(
                       makeOrder(id, sequencer::orderType::BUY, "SPY", 100, 100000000, core::task::TimeInForce::GTC)),
-                  TestableMatchingEngine::Result::APPLIED);
+                  TestableMatchingState::Result::APPLIED);
     }
     const auto rejectedOrder = makeOrder(11, sequencer::orderType::BUY, "SPY", 100, 1, core::task::TimeInForce::GTC);
     const auto rejectedOutcome = engine.invokeProcessBuyOrder(rejectedOrder);
-    ASSERT_EQ(rejectedOutcome.result, TestableMatchingEngine::Result::BOOK_CAPACITY_EXCEEDED);
+    ASSERT_EQ(rejectedOutcome.result, TestableMatchingState::Result::BOOK_CAPACITY_EXCEEDED);
 
     const auto cancelOutcome = engine.invokeProcessCancel(makeCancel(12, 1011, 11));
     ASSERT_EQ(cancelOutcome.events.size(), 1u);
@@ -1545,12 +1496,10 @@ TEST(MatchingEngineCancellationTest, CapacityRejectedTargetIsNotActive) {
 }
 
 TEST(MatchingEngineCancellationTest, MissingNormalizedFieldsAndInvalidKindsAreInvariantFailures) {
-    core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-    core::Bus bus(8);
-    TestableMatchingEngine engine(&seq_q, bus);
+    TestableMatchingState engine;
     ASSERT_EQ(
         engine.invokeAddOrder(makeOrder(1, sequencer::orderType::BUY, "SPY", 100, 40, core::task::TimeInForce::GTC)),
-        TestableMatchingEngine::Result::APPLIED);
+        TestableMatchingState::Result::APPLIED);
 
     const auto valid = makeCancel(2, 1001, 1);
     auto missingSequence = valid;
@@ -1588,12 +1537,10 @@ TEST(MatchingEngineCancellationTest, MissingNormalizedFieldsAndInvalidKindsAreIn
 
 TEST(MatchingEngineCancellationTest, FillVersusCancelIsDeterminedByProcessingOrder) {
     {
-        core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-        core::Bus bus(8);
-        TestableMatchingEngine engine(&seq_q, bus);
+        TestableMatchingState engine;
         ASSERT_EQ(engine.invokeAddOrder(
                       makeOrder(1, sequencer::orderType::SELL, "SPY", 100, 50, core::task::TimeInForce::GTC)),
-                  TestableMatchingEngine::Result::APPLIED);
+                  TestableMatchingState::Result::APPLIED);
 
         const auto cancelOutcome = engine.invokeProcessCancel(makeCancel(2, 1001, 1));
         ASSERT_NE(std::get_if<domain::OrderCancelled>(&cancelOutcome.events.front()), nullptr);
@@ -1606,12 +1553,10 @@ TEST(MatchingEngineCancellationTest, FillVersusCancelIsDeterminedByProcessingOrd
         EXPECT_TRUE(engine.stateIsConsistent());
     }
     {
-        core::SharedQueue<sequencer::sequenceMessage> seq_q(16);
-        core::Bus bus(8);
-        TestableMatchingEngine engine(&seq_q, bus);
+        TestableMatchingState engine;
         ASSERT_EQ(engine.invokeAddOrder(
                       makeOrder(1, sequencer::orderType::SELL, "SPY", 100, 50, core::task::TimeInForce::GTC)),
-                  TestableMatchingEngine::Result::APPLIED);
+                  TestableMatchingState::Result::APPLIED);
 
         const auto buyOutcome = engine.invokeProcessBuyOrder(
             makeOrder(2, sequencer::orderType::BUY, "SPY", 100, 50, core::task::TimeInForce::IOC));

@@ -50,12 +50,13 @@ public:
 // Testable matching engine subclass
 class TestableMatchingEngine : public matching_engine::MatchingEngine {
 public:
-    using matching_engine::MatchingEngine::MatchingEngine;
+    TestableMatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus,
+                           matching_engine::BoundedCommandResultQueue& commandResultQueue,
+                           matching_engine::MatchingState& matchingState)
+        : MatchingEngine(sequencerQueue, multicastBus, commandResultQueue, matchingState) {}
+
     void invokeDrain() {
         drainQueue(sequencerQueue, "Sequencer");
-    }
-    std::size_t activeOrderCount() const {
-        return activeOrders.size();
     }
 };
 
@@ -93,7 +94,8 @@ TEST(SequencerCancelNormalizationTest, ValidFixCancelGetsDistinctSequenceAndReac
     core::task::FixTask fixTask(sequencingIngressQueue, bus, clientIdentityResolver, admissionIndex);
     TestableSequencer sequencer(sequencingIngressQueue, matchingQueue, admissionIndex);
     matching_engine::BoundedCommandResultQueue resultQueue(4);
-    TestableMatchingEngine matchingEngine(&matchingQueue, bus, resultQueue);
+    matching_engine::MatchingState matchingState;
+    TestableMatchingEngine matchingEngine(&matchingQueue, bus, resultQueue, matchingState);
 
     fixTask.fromApp(makeFixNewOrder("NEW-1"), session);
     ASSERT_TRUE(fixTask.processNextStagedCommand());
@@ -163,7 +165,8 @@ TEST(SequencerClientIdentityTest, OwnershipUsesConfiguredClientIdAcrossSessions)
     core::task::FixTask fixTask(sequencingIngressQueue, bus, clientIdentityResolver, admissionIndex);
     TestableSequencer sequencer(sequencingIngressQueue, matchingQueue, admissionIndex);
     matching_engine::BoundedCommandResultQueue resultQueue(8);
-    TestableMatchingEngine matchingEngine(&matchingQueue, bus, resultQueue);
+    matching_engine::MatchingState matchingState;
+    TestableMatchingEngine matchingEngine(&matchingQueue, bus, resultQueue, matchingState);
 
     const auto normalizeAndSequence = [&](const FIX::Message& message,
                                           const FIX::SessionID& session) -> std::optional<sequencer::sequenceMessage> {
@@ -405,7 +408,8 @@ TEST(CommandAdmissionCompletionIntegrationTest, CompletedFixRetransmissionReturn
     core::task::FixTask fixTask(sequencingIngressQueue, bus, resolver, admissionIndex);
     TestableSequencer sequencer(sequencingIngressQueue, matchingQueue, admissionIndex);
     matching_engine::BoundedCommandResultQueue resultQueue(4);
-    TestableMatchingEngine matchingEngine(&matchingQueue, bus, resultQueue);
+    matching_engine::MatchingState matchingState;
+    TestableMatchingEngine matchingEngine(&matchingQueue, bus, resultQueue, matchingState);
     core::admission::AdmissionCompletionConsumer completionConsumer(resultQueue, admissionIndex);
     const FIX::Message message = makeFixNewOrder("COMPLETE-1");
 
@@ -416,7 +420,7 @@ TEST(CommandAdmissionCompletionIntegrationTest, CompletedFixRetransmissionReturn
     ASSERT_TRUE(sequencingIngressQueue.push(normalized));
     ASSERT_TRUE(sequencer.processOnce());
     matchingEngine.invokeDrain();
-    ASSERT_EQ(matchingEngine.activeOrderCount(), 1u);
+    ASSERT_EQ(matchingState.snapshot().activeOrders.size(), 1u);
 
     matching_engine::ImmutableCommandResultBatch original;
     ASSERT_TRUE(resultQueue.tryPop(original));
@@ -431,7 +435,7 @@ TEST(CommandAdmissionCompletionIntegrationTest, CompletedFixRetransmissionReturn
     EXPECT_FALSE(sequencer.processOnce());
     EXPECT_TRUE(matchingQueue.empty());
     matchingEngine.invokeDrain();
-    EXPECT_EQ(matchingEngine.activeOrderCount(), 1u);
+    EXPECT_EQ(matchingState.snapshot().activeOrders.size(), 1u);
     EXPECT_TRUE(resultQueue.empty());
     EXPECT_FALSE(completionConsumer.processNext());
 
@@ -589,8 +593,9 @@ TEST(E2EThroughputTest, SequencerToMatchingEngineThroughput) {
     // Create pipeline components
     auto sequencer = std::make_unique<TestableSequencer>(sequencing_ingress_queue, matching_engine_queue,
                                                          sequencer::Sequencer::INTERNAL_ADMISSION_BYPASS);
-    auto matching_engine =
-        std::make_unique<matching_engine::MatchingEngine>(&matching_engine_queue, multicast_bus, command_result_queue);
+    matching_engine::MatchingState matchingState;
+    auto matching_engine = std::make_unique<matching_engine::MatchingEngine>(&matching_engine_queue, multicast_bus,
+                                                                             command_result_queue, matchingState);
 
     std::atomic<bool> stop_sequencer{false};
     std::atomic<bool> stop_matching{false};
@@ -700,8 +705,9 @@ TEST(E2EThroughputTest, FullPipelineWithFixParsing) {
     // Create sequencer and matching engine
     auto sequencer =
         std::make_unique<TestableSequencer>(sequencing_ingress_queue, matching_engine_queue, admissionIndex);
-    auto matching_engine =
-        std::make_unique<matching_engine::MatchingEngine>(&matching_engine_queue, multicast_bus, command_result_queue);
+    matching_engine::MatchingState matchingState;
+    auto matching_engine = std::make_unique<matching_engine::MatchingEngine>(&matching_engine_queue, multicast_bus,
+                                                                             command_result_queue, matchingState);
 
     std::atomic<bool> stop_fix{false};
     std::atomic<bool> stop_sequencer{false};

@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <iostream>
+#include <memory>
 #include <thread>
 
 #if __cplusplus >= 201703L
@@ -41,6 +42,7 @@ int main() {
             MATCHING_ENGINE_QUEUE_SIZE);
 
         exchange::core::Bus multicastBus(BUS_SIZE);
+        // Legacy non-durable path: this unqualified index starts open without lifecycle control.
         exchange::core::admission::CommandAdmissionIndex commandAdmissionIndex(COMMAND_ADMISSION_CAPACITY);
         exchange::matching_engine::BoundedCommandResultQueue commandResultQueue(COMMAND_RESULT_QUEUE_SIZE);
         exchange::core::admission::AdmissionCompletionConsumer admissionCompletionConsumer(commandResultQueue,
@@ -50,8 +52,10 @@ int main() {
                                                   commandAdmissionIndex);
 
         exchange::sequencer::Sequencer sequencer(sequencingIngressQueue, matchingEngineQueue, commandAdmissionIndex);
+        // Composition owns the state for the entire worker/thread lifetime.
+        exchange::matching_engine::MatchingState matchingState;
         exchange::matching_engine::MatchingEngine matching_engine(&matchingEngineQueue, multicastBus,
-                                                                  commandResultQueue);
+                                                                  commandResultQueue, matchingState);
 
         // QuickFIX session threads publish admitted commands to FixTask's bounded staging queue.
         // This worker forwards them in staging FIFO order to sequencingIngressQueue.
