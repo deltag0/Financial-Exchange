@@ -21,7 +21,7 @@ enum class orderType : uint8_t {
 Message format transmitted to the matching engine
 
 targetOrderId: authoritative exchange OrderId targeted by a normalized cancel
-globalSequenceNumber: checked process-local sequence assigned by the sole sequencer
+globalSequenceNumber: candidate sequence; authoritative only after journal-backed append commits
 price: price of the order
 quantity: quantity of the order
 symbol: symbol of the order

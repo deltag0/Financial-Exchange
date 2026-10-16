@@ -51,18 +51,9 @@ void FixTask::fromApp(const FIX::Message &message, const FIX::SessionID &session
     }
 
     try {
-        const admission::AdmissionDecision decision = commandAdmissionIndex.reserve(*normalized);
-        if (decision.status != admission::AdmissionStatus::FIRST_SUBMISSION) {
-            return;
-        }
-
-        if (!stagingQueue_.push(*normalized)) {
+        const admission::AdmissionDecision decision = commandAdmissionIndex.reserveAndStage(*normalized, stagingQueue_);
+        if (decision.rejectionReason == domain::AdmissionRejectionReason::GATEWAY_BUSY) {
             stagingQueueSaturations_.fetch_add(1, std::memory_order_relaxed);
-            const bool abandoned = commandAdmissionIndex.abandonReservation(*normalized);
-            if (!abandoned) {
-                reservationAbandonFailures_.fetch_add(1, std::memory_order_relaxed);
-                std::cerr << "[FixTask] Invariant failure: staging-full reservation could not be abandoned\n";
-            }
         }
     } catch (const std::exception &exception) {
         internalFailures_.fetch_add(1, std::memory_order_relaxed);

@@ -26,6 +26,11 @@ const char* completionStatusName(const CompletionStatus status) {
 } // namespace
 
 bool AdmissionCompletionConsumer::processNext() {
+    matching_engine::ImmutableCommandResultBatch completedBatch;
+    return processNext(completedBatch);
+}
+
+bool AdmissionCompletionConsumer::processNext(matching_engine::ImmutableCommandResultBatch& completedBatch) {
     if (failure_.has_value()) {
         throw std::logic_error("admission completion consumer is fail-stopped after " +
                                std::string{completionStatusName(*failure_)});
@@ -40,7 +45,7 @@ bool AdmissionCompletionConsumer::processNext() {
         throw std::logic_error("admission completion invariant failure: " + std::string{completionStatusName(status)});
     }
 
-    pendingBatch_.reset();
+    completedBatch = std::move(pendingBatch_);
     return true;
 }
 

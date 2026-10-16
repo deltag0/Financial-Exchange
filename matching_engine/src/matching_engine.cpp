@@ -1,5 +1,6 @@
 #include "../include/matching_engine.hpp"
 
+#include "../../core/instrument/include/instrument_config.hpp"
 #include "../../core/task/include/adaptive_idle.hpp"
 #include "../../core/task/include/task.hpp"
 #include <algorithm>
@@ -22,13 +23,15 @@ std::size_t checkedAddEventCount(const std::size_t currentCount, const std::size
     return currentCount + additionalCount;
 }
 
-domain::EventId makeEventId(const domain::CommandSequence commandSequence, const std::size_t eventIndex) {
+domain::EventId makeEventId(const domain::ExchangeRunId exchangeRunId, const domain::CommandSequence commandSequence,
+                            const std::size_t eventIndex) {
     if (eventIndex > std::numeric_limits<domain::EventIndex::Underlying>::max()) {
         throw std::logic_error("EventIndex exhausted during one command");
     }
     return domain::EventId{
         .commandSequence = commandSequence,
         .eventIndex = domain::EventIndex{static_cast<domain::EventIndex::Underlying>(eventIndex)},
+        .exchangeRunId = exchangeRunId,
     };
 }
 
@@ -42,7 +45,8 @@ domain::Side toDomainSide(const sequencer::orderType side) {
     throw std::logic_error("non-order side reached matching engine");
 }
 
-domain::CommandResultCorrelation resultCorrelationFrom(const sequencer::sequenceMessage& message) {
+domain::CommandResultCorrelation resultCorrelationFrom(const sequencer::sequenceMessage& message,
+                                                       const domain::ExchangeRunId exchangeRunId) {
     if (message.clientId.value() == 0 || !message.clientCommandId.has_value() ||
         message.globalSequenceNumber.value() == 0) {
         throw std::logic_error("sequenced command is missing result correlation");
@@ -51,32 +55,41 @@ domain::CommandResultCorrelation resultCorrelationFrom(const sequencer::sequence
         .clientId = message.clientId,
         .clientCommandId = *message.clientCommandId,
         .commandSequence = message.globalSequenceNumber,
+        .exchangeRunId = exchangeRunId,
     };
 }
 
 } // namespace
 
 MatchingEngine::MatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus,
-                               BoundedCommandResultQueue& commandResultQueue)
-    : sequencerQueue(*sequencerQueue), multicastBus(multicastBus), commandResultQueue(commandResultQueue) {}
+                               BoundedCommandResultQueue& commandResultQueue, MatchingState& matchingState)
+    : sequencerQueue(*sequencerQueue),
+      multicastBus(multicastBus),
+      commandResultQueue(commandResultQueue),
+      matchingState_(matchingState) {}
 
 MatchingEngine::MatchingEngine(core::SharedQueue<sequencer::sequenceMessage>* sequencerQueue, core::Bus& multicastBus,
-                               const std::size_t ownedResultQueueCapacity)
+                               const std::size_t ownedResultQueueCapacity, MatchingState& matchingState)
     : sequencerQueue(*sequencerQueue),
       multicastBus(multicastBus),
       ownedCommandResultQueue(std::make_unique<BoundedCommandResultQueue>(ownedResultQueueCapacity)),
-      commandResultQueue(*ownedCommandResultQueue) {}
+      commandResultQueue(*ownedCommandResultQueue),
+      matchingState_(matchingState) {}
 
 void MatchingEngine::run() {
     std::cout << "[MatchingEngine] Thread started" << std::endl;
     core::task::AdaptiveIdle idle;
     while (true) {
-        if (drainQueue(sequencerQueue, "Sequencer")) {
+        if (advance()) {
             idle.reset();
         } else {
             idle.wait();
         }
     }
+}
+
+bool MatchingEngine::advance() {
+    return drainQueue(sequencerQueue, "Sequencer");
 }
 
 void MatchingEngine::send(sequencer::sequenceMessage& message) {
@@ -98,12 +111,11 @@ bool MatchingEngine::drainQueue(core::SharedQueue<sequencer::sequenceMessage>& q
     sequencer::sequenceMessage message{};
     while (queue.pop(message)) {
         progressed = true;
-        const domain::CommandResultCorrelation correlation = resultCorrelationFrom(message);
-        ProcessingOutcome outcome = processMessage(message);
-        ImmutableCommandResultBatch batch =
-            std::make_shared<const CommandResultBatch>(correlation, outcome.result, std::move(outcome.events));
+        inProgressCommand_ = std::move(message);
+        ImmutableCommandResultBatch batch = matchingState_.processCommand(*inProgressCommand_);
 
-        send(message);
+        send(*inProgressCommand_);
+        inProgressCommand_.reset();
         if (!commandResultQueue.tryPush(batch)) {
             pendingCommandResult = std::move(batch);
             return true;
@@ -123,7 +135,13 @@ bool MatchingEngine::handoffPendingResult() {
     return true;
 }
 
-MatchingEngine::ProcessingOutcome MatchingEngine::processBuyOrder(const sequencer::sequenceMessage& message) {
+ImmutableCommandResultBatch MatchingState::processCommand(const sequencer::sequenceMessage& message) {
+    const domain::CommandResultCorrelation correlation = resultCorrelationFrom(message, exchangeRunId_);
+    ProcessingOutcome outcome = processMessage(message);
+    return std::make_shared<const CommandResultBatch>(correlation, outcome.result, std::move(outcome.events));
+}
+
+MatchingState::ProcessingOutcome MatchingState::processBuyOrder(const sequencer::sequenceMessage& message) {
     if (message.tif != core::task::TimeInForce::GTC && message.tif != core::task::TimeInForce::IOC) {
         throw std::logic_error("unsupported TimeInForce reached matching engine");
     }
@@ -134,7 +152,7 @@ MatchingEngine::ProcessingOutcome MatchingEngine::processBuyOrder(const sequence
     return processOrder(message, message.tif == core::task::TimeInForce::GTC);
 }
 
-MatchingEngine::ProcessingOutcome MatchingEngine::processSellOrder(const sequencer::sequenceMessage& message) {
+MatchingState::ProcessingOutcome MatchingState::processSellOrder(const sequencer::sequenceMessage& message) {
     if (message.tif != core::task::TimeInForce::GTC && message.tif != core::task::TimeInForce::IOC) {
         throw std::logic_error("unsupported TimeInForce reached matching engine");
     }
@@ -145,7 +163,7 @@ MatchingEngine::ProcessingOutcome MatchingEngine::processSellOrder(const sequenc
     return processOrder(message, message.tif == core::task::TimeInForce::GTC);
 }
 
-MatchingEngine::ProcessingOutcome MatchingEngine::processCancel(const sequencer::sequenceMessage& message) {
+MatchingState::ProcessingOutcome MatchingState::processCancel(const sequencer::sequenceMessage& message) {
     if (message.type != sequencer::orderType::CANCEL || message.globalSequenceNumber.value() == 0 ||
         message.clientId.value() == 0 || !message.clientCommandId.has_value() || message.instrumentId.value() == 0 ||
         !message.targetOrderId.has_value()) {
@@ -174,7 +192,7 @@ MatchingEngine::ProcessingOutcome MatchingEngine::processCancel(const sequencer:
     std::vector<domain::BusinessEvent> events;
     events.reserve(1);
     events.emplace_back(domain::OrderCancelled{
-        .eventId = makeEventId(message.globalSequenceNumber, 0),
+        .eventId = makeEventId(exchangeRunId_, message.globalSequenceNumber, 0),
         .orderId = targetOrderId,
         .clientId = owner,
         .instrumentId = instrumentId,
@@ -186,8 +204,8 @@ MatchingEngine::ProcessingOutcome MatchingEngine::processCancel(const sequencer:
     return {ProcessingResult::APPLIED, std::move(events)};
 }
 
-MatchingEngine::ProcessingOutcome MatchingEngine::processOrder(const sequencer::sequenceMessage& message,
-                                                               const bool restRemainder) {
+MatchingState::ProcessingOutcome MatchingState::processOrder(const sequencer::sequenceMessage& message,
+                                                             const bool restRemainder) {
     const MatchPlan plan = planMatches(message);
     const std::size_t plannedEventCount =
         checkedAddEventCount(plan.executionCount, plan.remainder.value() > 0 ? 1u : 0u);
@@ -199,7 +217,7 @@ MatchingEngine::ProcessingOutcome MatchingEngine::processOrder(const sequencer::
     }
 
     if (plannedEventCount > 0) {
-        static_cast<void>(makeEventId(message.globalSequenceNumber, plannedEventCount - 1));
+        static_cast<void>(makeEventId(exchangeRunId_, message.globalSequenceNumber, plannedEventCount - 1));
     }
     std::vector<domain::BusinessEvent> events;
     events.reserve(plannedEventCount);
@@ -217,7 +235,7 @@ MatchingEngine::ProcessingOutcome MatchingEngine::processOrder(const sequencer::
         }
 
         events.emplace_back(domain::OrderRested{
-            .eventId = makeEventId(message.globalSequenceNumber, events.size()),
+            .eventId = makeEventId(exchangeRunId_, message.globalSequenceNumber, events.size()),
             .orderId = message.orderId,
             .clientId = message.clientId,
             .instrumentId = message.instrumentId,
@@ -227,7 +245,7 @@ MatchingEngine::ProcessingOutcome MatchingEngine::processOrder(const sequencer::
         });
     } else if (remaining.value() > 0) {
         events.emplace_back(domain::OrderCancelled{
-            .eventId = makeEventId(message.globalSequenceNumber, events.size()),
+            .eventId = makeEventId(exchangeRunId_, message.globalSequenceNumber, events.size()),
             .orderId = message.orderId,
             .clientId = message.clientId,
             .instrumentId = message.instrumentId,
@@ -242,7 +260,7 @@ MatchingEngine::ProcessingOutcome MatchingEngine::processOrder(const sequencer::
     return {ProcessingResult::APPLIED, std::move(events)};
 }
 
-bool MatchingEngine::canAddOrder(const sequencer::sequenceMessage& message, const domain::Quantity quantity) const {
+bool MatchingState::canAddOrder(const sequencer::sequenceMessage& message, const domain::Quantity quantity) const {
     if (quantity.value() == 0) {
         return true;
     }
@@ -277,7 +295,7 @@ bool MatchingEngine::canAddOrder(const sequencer::sequenceMessage& message, cons
     return currentAggregate <= maximum && quantity.value() <= maximum.value() - currentAggregate.value();
 }
 
-MatchingEngine::ProcessingOutcome MatchingEngine::rejectBookCapacity(const sequencer::sequenceMessage& message) const {
+MatchingState::ProcessingOutcome MatchingState::rejectBookCapacity(const sequencer::sequenceMessage& message) const {
     if (!message.clientCommandId.has_value()) {
         throw std::logic_error("sequenced command is missing ClientCommandId");
     }
@@ -289,6 +307,7 @@ MatchingEngine::ProcessingOutcome MatchingEngine::rejectBookCapacity(const seque
             domain::EventId{
                 .commandSequence = message.globalSequenceNumber,
                 .eventIndex = domain::EventIndex{0},
+                .exchangeRunId = exchangeRunId_,
             },
         .commandType = domain::CommandType::NEW_ORDER,
         .clientId = message.clientId,
@@ -299,13 +318,13 @@ MatchingEngine::ProcessingOutcome MatchingEngine::rejectBookCapacity(const seque
     return {ProcessingResult::BOOK_CAPACITY_EXCEEDED, std::move(events)};
 }
 
-MatchingEngine::ProcessingOutcome MatchingEngine::rejectCancel(const sequencer::sequenceMessage& message,
-                                                               const domain::OrderId targetOrderId,
-                                                               const domain::CommandRejectionReason reason) const {
+MatchingState::ProcessingOutcome MatchingState::rejectCancel(const sequencer::sequenceMessage& message,
+                                                             const domain::OrderId targetOrderId,
+                                                             const domain::CommandRejectionReason reason) const {
     std::vector<domain::BusinessEvent> events;
     events.reserve(1);
     events.emplace_back(domain::CommandRejected{
-        .eventId = makeEventId(message.globalSequenceNumber, 0),
+        .eventId = makeEventId(exchangeRunId_, message.globalSequenceNumber, 0),
         .commandType = domain::CommandType::CANCEL,
         .clientId = message.clientId,
         .clientCommandId = *message.clientCommandId,
@@ -315,8 +334,8 @@ MatchingEngine::ProcessingOutcome MatchingEngine::rejectCancel(const sequencer::
     return {ProcessingResult::APPLIED, std::move(events)};
 }
 
-MatchingEngine::ProcessingResult MatchingEngine::addOrder(const sequencer::sequenceMessage& message,
-                                                          const domain::Quantity remainingQuantity) {
+MatchingState::ProcessingResult MatchingState::addOrder(const sequencer::sequenceMessage& message,
+                                                        const domain::Quantity remainingQuantity) {
     if (activeOrders.contains(message.orderId)) {
         throw std::logic_error("duplicate authoritative OrderId reached matching engine");
     }
@@ -361,8 +380,8 @@ MatchingEngine::ProcessingResult MatchingEngine::addOrder(const sequencer::seque
     return ProcessingResult::APPLIED;
 }
 
-void MatchingEngine::matchOrder(const sequencer::sequenceMessage& message, domain::Quantity& remaining,
-                                std::vector<domain::BusinessEvent>& events) {
+void MatchingState::matchOrder(const sequencer::sequenceMessage& message, domain::Quantity& remaining,
+                               std::vector<domain::BusinessEvent>& events) {
     if (message.type == sequencer::orderType::BUY) {
         matchBuyOrder(message, remaining, events);
     } else if (message.type == sequencer::orderType::SELL) {
@@ -372,8 +391,8 @@ void MatchingEngine::matchOrder(const sequencer::sequenceMessage& message, domai
     }
 }
 
-void MatchingEngine::matchBuyOrder(const sequencer::sequenceMessage& message, domain::Quantity& remaining,
-                                   std::vector<domain::BusinessEvent>& events) {
+void MatchingState::matchBuyOrder(const sequencer::sequenceMessage& message, domain::Quantity& remaining,
+                                  std::vector<domain::BusinessEvent>& events) {
     while (remaining.value() > 0) {
         auto instrument = orderBooks.find(message.instrumentId);
         if (instrument == orderBooks.end() || instrument->second.asks.empty()) {
@@ -393,8 +412,8 @@ void MatchingEngine::matchBuyOrder(const sequencer::sequenceMessage& message, do
     }
 }
 
-void MatchingEngine::matchSellOrder(const sequencer::sequenceMessage& message, domain::Quantity& remaining,
-                                    std::vector<domain::BusinessEvent>& events) {
+void MatchingState::matchSellOrder(const sequencer::sequenceMessage& message, domain::Quantity& remaining,
+                                   std::vector<domain::BusinessEvent>& events) {
     while (remaining.value() > 0) {
         auto instrument = orderBooks.find(message.instrumentId);
         if (instrument == orderBooks.end() || instrument->second.bids.empty()) {
@@ -414,10 +433,10 @@ void MatchingEngine::matchSellOrder(const sequencer::sequenceMessage& message, d
     }
 }
 
-void MatchingEngine::executeTrade(const sequencer::sequenceMessage& message, const sequencer::orderType makerSide,
-                                  const domain::Side takerSide, const domain::Price executionPrice,
-                                  PriceLevel& priceLevel, domain::Quantity& remaining,
-                                  std::vector<domain::BusinessEvent>& events) {
+void MatchingState::executeTrade(const sequencer::sequenceMessage& message, const sequencer::orderType makerSide,
+                                 const domain::Side takerSide, const domain::Price executionPrice,
+                                 PriceLevel& priceLevel, domain::Quantity& remaining,
+                                 std::vector<domain::BusinessEvent>& events) {
     auto orderLocation = priceLevel.orders.begin();
     auto activeOrder = activeOrders.find(orderLocation->orderId);
     if (activeOrder == activeOrders.end() || activeOrder->second.instrumentId != message.instrumentId ||
@@ -436,7 +455,7 @@ void MatchingEngine::executeTrade(const sequencer::sequenceMessage& message, con
     const domain::Quantity makerRemaining{orderLocation->remainingQuantity.value() - tradeQuantity};
     const domain::Quantity takerRemaining{remaining.value() - tradeQuantity};
     events.emplace_back(domain::Trade{
-        .eventId = makeEventId(message.globalSequenceNumber, events.size()),
+        .eventId = makeEventId(exchangeRunId_, message.globalSequenceNumber, events.size()),
         .instrumentId = message.instrumentId,
         .makerOrderId = orderLocation->orderId,
         .makerClientId = orderLocation->owner,
@@ -459,7 +478,7 @@ void MatchingEngine::executeTrade(const sequencer::sequenceMessage& message, con
     }
 }
 
-MatchingEngine::MatchPlan MatchingEngine::planMatches(const sequencer::sequenceMessage& message) const {
+MatchingState::MatchPlan MatchingState::planMatches(const sequencer::sequenceMessage& message) const {
     MatchPlan plan{.remainder = message.quantity, .executionCount = 0};
     const auto instrument = orderBooks.find(message.instrumentId);
     if (instrument == orderBooks.end()) {
@@ -495,7 +514,7 @@ MatchingEngine::MatchPlan MatchingEngine::planMatches(const sequencer::sequenceM
     return plan;
 }
 
-void MatchingEngine::removeFilledOrder(std::map<domain::OrderId, ActiveOrder>::iterator activeOrder) {
+void MatchingState::removeFilledOrder(std::map<domain::OrderId, ActiveOrder>::iterator activeOrder) {
     if (activeOrder == activeOrders.end() || activeOrder->second.remainingQuantity.value() != 0 ||
         activeOrder->second.orderLocation->remainingQuantity.value() != 0) {
         throw std::logic_error("only a fully filled active order can use filled-order removal");
@@ -546,7 +565,7 @@ void MatchingEngine::removeFilledOrder(std::map<domain::OrderId, ActiveOrder>::i
     }
 }
 
-void MatchingEngine::removeCancelledOrder(std::map<domain::OrderId, ActiveOrder>::iterator activeOrder) {
+void MatchingState::removeCancelledOrder(std::map<domain::OrderId, ActiveOrder>::iterator activeOrder) {
     if (activeOrder == activeOrders.end() || activeOrder->second.remainingQuantity.value() == 0) {
         throw std::logic_error("only an active positive-quantity order can be cancelled");
     }
@@ -605,7 +624,84 @@ void MatchingEngine::removeCancelledOrder(std::map<domain::OrderId, ActiveOrder>
     }
 }
 
-MatchingEngine::ProcessingOutcome MatchingEngine::processMessage(const sequencer::sequenceMessage& message) {
+MatchingStateSnapshot MatchingState::snapshot() const {
+    MatchingStateSnapshot result{.exchangeRunId = exchangeRunId_};
+    for (const auto& [instrumentId, instrumentBook] : orderBooks) {
+        const auto appendLevels = [&](const auto& book, const domain::Side side) {
+            for (const auto& [price, level] : book) {
+                PriceLevelSnapshot levelSnapshot{
+                    .instrumentId = instrumentId,
+                    .side = side,
+                    .price = price,
+                    .totalQuantity = level.totalQuantity,
+                };
+                levelSnapshot.orders.reserve(level.orders.size());
+                for (const OrderNode& order : level.orders) {
+                    levelSnapshot.orders.push_back({order.orderId, order.owner, order.remainingQuantity});
+                }
+                result.priceLevels.push_back(std::move(levelSnapshot));
+            }
+        };
+        appendLevels(instrumentBook.bids, domain::Side::BUY);
+        appendLevels(instrumentBook.asks, domain::Side::SELL);
+    }
+
+    result.activeOrders.reserve(activeOrders.size());
+    for (const auto& [orderId, activeOrder] : activeOrders) {
+        result.activeOrders.push_back({
+            .orderId = orderId,
+            .owner = activeOrder.owner,
+            .instrumentId = activeOrder.instrumentId,
+            .side = toDomainSide(activeOrder.side),
+            .price = activeOrder.price,
+            .remainingQuantity = activeOrder.remainingQuantity,
+        });
+    }
+    return result;
+}
+
+bool MatchingState::invariantsHold() const noexcept {
+    std::size_t nodeCount = 0;
+    for (const auto& [instrumentId, instrumentBook] : orderBooks) {
+        if (instrumentBook.bids.empty() && instrumentBook.asks.empty()) {
+            return false;
+        }
+        const auto checkSide = [&](const auto& book, const sequencer::orderType side) {
+            for (const auto& [price, level] : book) {
+                if (level.orders.empty()) {
+                    return false;
+                }
+                std::uint64_t totalQuantity = 0;
+                for (auto order = level.orders.cbegin(); order != level.orders.cend(); ++order) {
+                    if (order->remainingQuantity.value() == 0) {
+                        return false;
+                    }
+                    ++nodeCount;
+                    totalQuantity += order->remainingQuantity.value();
+                    const auto activeOrder = activeOrders.find(order->orderId);
+                    if (activeOrder == activeOrders.end() || activeOrder->second.owner != order->owner ||
+                        activeOrder->second.instrumentId != instrumentId || activeOrder->second.side != side ||
+                        activeOrder->second.price != price ||
+                        activeOrder->second.remainingQuantity != order->remainingQuantity ||
+                        &*activeOrder->second.orderLocation != &*order) {
+                        return false;
+                    }
+                }
+                if (totalQuantity != level.totalQuantity.value()) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (!checkSide(instrumentBook.bids, sequencer::orderType::BUY) ||
+            !checkSide(instrumentBook.asks, sequencer::orderType::SELL)) {
+            return false;
+        }
+    }
+    return nodeCount == activeOrders.size();
+}
+
+MatchingState::ProcessingOutcome MatchingState::processMessage(const sequencer::sequenceMessage& message) {
     switch (message.type) {
         case sequencer::orderType::BUY:
             return processBuyOrder(message);

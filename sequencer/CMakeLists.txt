@@ -9,7 +9,7 @@ target_include_directories(sequencer_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/incl
 target_include_directories(sequencer_lib PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Link the core exchange headers to the sequencer library
-target_link_libraries(sequencer_lib PUBLIC core_lib)
+target_link_libraries(sequencer_lib PUBLIC core_lib storage_codec)
 
 add_executable(sequencer_production_loop_smoke
     tests/test_production_loop_smoke.cpp
@@ -24,8 +24,13 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(sequencer_lib PRIVATE rt)
 endif()
 
-# E2E throughput tests
+# Sequencer tests
 if(GTEST_FOUND)
+    add_executable(sequencer_journal_tests tests/test_journal_sequencing.cpp)
+    target_include_directories(sequencer_journal_tests PRIVATE ${CMAKE_SOURCE_DIR}/core/storage/src)
+    target_link_libraries(sequencer_journal_tests PRIVATE sequencer_lib recovered_run GTest::gtest GTest::gtest_main)
+    add_test(NAME SequencerJournalUnitTests COMMAND sequencer_journal_tests)
+
     add_executable(e2e_throughput_tests
         tests/test_e2e_throughput.cpp
     )

@@ -7,11 +7,25 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <variant>
+#include <vector>
+
+namespace exchange::storage {
+struct LoadedRunJournalV1;
+}
+
+namespace exchange::core {
+class ExchangeRunController;
+template <typename T>
+class SharedQueue;
+} // namespace exchange::core
 
 namespace exchange::core::admission {
+
+struct CommandAdmissionRecoveryResult;
 
 struct AdmissionKey final {
     domain::ClientId clientId;
@@ -84,20 +98,42 @@ enum class CompletionStatus : std::uint8_t {
 
 class CommandAdmissionIndex final {
 public:
+    // Legacy, non-durable admission: immediately available and not lifecycle controlled.
     explicit CommandAdmissionIndex(std::size_t capacity);
+    // Run-bound admission starts closed, including reconstructed completed indexes.
+    CommandAdmissionIndex(std::size_t capacity, domain::ExchangeRunId exchangeRunId);
 
     [[nodiscard]] AdmissionDecision reserve(const sequencer::sequenceMessage& command);
+    // One mutex decision covers lookup, availability, record allocation, and nonblocking staging.
+    [[nodiscard]] AdmissionDecision reserveAndStage(const sequencer::sequenceMessage& command,
+                                                    core::SharedQueue<sequencer::sequenceMessage>& stagingQueue);
     [[nodiscard]] MarkSequencedStatus markSequenced(const sequencer::sequenceMessage& command);
     [[nodiscard]] CompletionStatus complete(matching_engine::ImmutableCommandResultBatch result);
     [[nodiscard]] matching_engine::ImmutableCommandResultBatch completedResult(
         const sequencer::sequenceMessage& command) const;
-    [[nodiscard]] bool abandonReservation(const sequencer::sequenceMessage& command);
 
     [[nodiscard]] std::size_t size() const;
     [[nodiscard]] std::size_t capacity() const noexcept;
+    [[nodiscard]] domain::ExchangeRunId exchangeRunId() const noexcept;
     [[nodiscard]] AdmissionStatistics statistics() const;
 
 private:
+    friend class core::ExchangeRunController;
+    friend class CommandAdmissionIndexTestAccess;
+
+    void setAdmissionOpen(bool open);
+    [[nodiscard]] AdmissionDecision reserveAndStageForRunCapacity(
+        const sequencer::sequenceMessage& command, core::SharedQueue<sequencer::sequenceMessage>& stagingQueue,
+        bool capacityAvailable);
+    [[nodiscard]] AdmissionDecision reserveImpl(const sequencer::sequenceMessage& command,
+                                                core::SharedQueue<sequencer::sequenceMessage>* stagingQueue,
+                                                bool capacityAvailable = true);
+
+    friend CommandAdmissionRecoveryResult reconstructCommandAdmissionIndex(
+        const storage::LoadedRunJournalV1& journal,
+        const std::vector<matching_engine::ImmutableCommandResultBatch>& commandResults,
+        std::unique_ptr<CommandAdmissionIndex>& output) noexcept;
+
     struct AdmissionKeyLess final {
         bool operator()(const AdmissionKey& left, const AdmissionKey& right) const noexcept;
     };
@@ -120,7 +156,9 @@ private:
     static NormalizedBusinessCommand businessCommandFrom(const sequencer::sequenceMessage& command);
 
     const std::size_t capacity_;
+    const domain::ExchangeRunId exchangeRunId_;
     mutable std::mutex mutex_;
+    bool admissionOpen_{false};
     std::map<AdmissionKey, Record, AdmissionKeyLess> records_;
     AdmissionStatistics statistics_;
 };

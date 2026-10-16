@@ -1,0 +1,1207 @@
+<title>Exchange Lab Direction Proofs</title>
+<meta name="description" content="Visual proofs for the Exchange Lab frontend review: two art directions, one lesson workspace, provenance stamps, states, and asset plan. Sample data only.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&family=Silkscreen&display=swap">
+<style>
+/* Layout: a review dossier. Narrow reading column for prose; full-width stages for 1280x720 proofs scaled to fit. */
+:root {
+  --page: #e7e9ec;
+  --sheet: #f6f7f8;
+  --ink: #1d2129;
+  --muted: #555c68;
+  --rule: #c7ccd3;
+  --accent: #a8561c;
+  --accent-ink: #ffffff;
+  --note: #e9dcc9;
+  --display: "Silkscreen", "Courier New", monospace;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page: #14161b; --sheet: #1c1f26; --ink: #e8eaee; --muted: #a3aab6; --rule: #343944;
+    --accent: #f0a640; --accent-ink: #1b1308; --note: #3a2f22; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --page: #14161b; --sheet: #1c1f26; --ink: #e8eaee; --muted: #a3aab6; --rule: #343944;
+  --accent: #f0a640; --accent-ink: #1b1308; --note: #3a2f22; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { background: var(--page); color: var(--ink); font: 400 16px/1.6 var(--body); }
+.wrap { max-width: 1320px; margin: 0 auto; padding-inline: clamp(16px, 3vw, 32px); padding-block: 32px 80px; }
+.prose { max-width: 68ch; }
+h1, h2, h3 { text-wrap: balance; line-height: 1.2; }
+h1 { font: 400 clamp(28px, 4vw, 48px)/1.1 var(--display); margin: 8px 0 12px; letter-spacing: .01em; }
+h2 { font: 400 24px/1.25 var(--display); margin: 0 0 8px; }
+h3 { font: 600 18px/1.3 var(--body); margin: 24px 0 6px; }
+p { margin: 0 0 12px; }
+a { color: inherit; text-underline-offset: 3px; }
+.eyebrow { font: 600 12px/1.4 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+.lede { font-size: 18px; color: var(--muted); }
+.banner { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 12px 16px; background: var(--note); border-left: 4px solid var(--accent); font: 500 14px/1.5 var(--body); margin: 20px 0 0; }
+.banner b { font-family: var(--mono); letter-spacing: .06em; }
+section.part { padding-block: 48px 8px; border-top: 1px solid var(--rule); margin-top: 40px; }
+.toc { display: flex; flex-wrap: wrap; gap: 8px; margin: 24px 0 0; padding: 0; list-style: none; }
+.toc a { display: inline-block; padding: 6px 10px; border: 1px solid var(--rule); background: var(--sheet); text-decoration: none; font: 500 13px/1.3 var(--mono); }
+.toc a:hover { border-color: var(--accent); }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; font: 500 13px/1.4 var(--mono); }
+.chipbtn { font: 600 12px/1 var(--mono); letter-spacing: .05em; padding: 8px 10px; border: 1px solid var(--rule); background: var(--sheet); color: var(--ink); cursor: pointer; }
+.chipbtn[aria-pressed="true"] { background: var(--ink); color: var(--page); border-color: var(--ink); }
+figure { margin: 16px 0 28px; }
+figcaption { font: 400 14px/1.55 var(--body); color: var(--muted); margin-top: 10px; max-width: 80ch; }
+figcaption b { color: var(--ink); }
+
+/* Map of places, lenses, overlays */
+.map { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+.map > div { background: var(--sheet); border: 1px solid var(--rule); padding: 14px 16px; min-width: 0; }
+.map h4 { margin: 0 0 6px; font: 400 16px/1.2 var(--display); }
+.map ul { margin: 0; padding-left: 18px; font-size: 14px; }
+.map li { margin: 4px 0; }
+.map .tag { font: 600 11px/1 var(--mono); letter-spacing: .08em; color: var(--muted); }
+@media (max-width: 760px) { .map { grid-template-columns: minmax(0, 1fr); } }
+
+/* Scaled 1280x720 stage */
+.stage { position: relative; width: 100%; max-width: 1280px; aspect-ratio: 16 / 9; overflow: hidden; background: #000; box-shadow: 0 1px 0 var(--rule); }
+.stage-inner { position: absolute; left: 0; top: 0; width: 1280px; height: 720px; transform-origin: 0 0; }
+.stage canvas.world { position: absolute; inset: 0; width: 1280px; height: 720px; image-rendering: pixelated; image-rendering: crisp-edges; }
+.stage-inner.pushing canvas.world { animation: push 240ms steps(6, end) forwards; }
+@keyframes push { to { transform: scale(1.18); } }
+.scale-note { font: 500 12px/1.4 var(--mono); color: var(--muted); margin-top: 6px; }
+
+/* Shared pixel-UI primitives (2x UI grid) */
+.px-icon { display: inline-block; width: 20px; height: 20px; flex: none; }
+.px-icon svg { width: 100%; height: 100%; display: block; shape-rendering: crispEdges; }
+
+/* ---------- Home HUD ---------- */
+.hud { position: absolute; inset: 0; font-family: var(--body); }
+.hud .wordmark { position: absolute; left: 24px; top: 20px; display: flex; align-items: center; gap: 10px; padding: 8px 12px; font: 400 16px/1 var(--display); }
+.hud .hud-right { position: absolute; right: 24px; top: 20px; display: flex; gap: 8px; align-items: center; }
+.hud .proto { position: absolute; left: 50%; top: 20px; transform: translateX(-50%); padding: 6px 10px; font: 600 12px/1 var(--mono); letter-spacing: .1em; }
+.hotspot { position: absolute; background: transparent; border: 0; padding: 0; cursor: pointer; }
+.hotspot:focus-visible { outline: none; }
+.hotspot:focus-visible + .tag-label, .hotspot:hover + .tag-label { transform: translate(-50%, -4px); }
+.tag-label { position: absolute; transform: translate(-50%, 0); pointer-events: none; padding: 6px 10px; font: 600 13px/1.2 var(--body); white-space: nowrap; transition: transform 120ms; display: flex; gap: 8px; align-items: center; }
+.tag-label small { font: 600 10px/1 var(--mono); letter-spacing: .08em; opacity: .8; }
+.start-card { position: absolute; left: 50%; bottom: 20px; transform: translateX(-50%); width: 560px; padding: 16px 20px; display: grid; grid-template-columns: 1fr auto; gap: 6px 20px; align-items: center; }
+.start-card .k { grid-column: 1 / -1; font: 600 11px/1 var(--mono); letter-spacing: .1em; }
+.start-card h3 { margin: 0; font: 600 22px/1.2 var(--body); }
+.start-card p { margin: 0; font-size: 14px; line-height: 1.45; }
+.start-card .go { grid-row: 2 / span 2; grid-column: 2; }
+.start-card .secondary { grid-column: 1 / -1; display: flex; gap: 18px; font: 500 13px/1 var(--body); margin-top: 6px; }
+.btn { display: inline-flex; align-items: center; gap: 10px; padding: 12px 16px; font: 600 14px/1 var(--body); border: 0; cursor: pointer; text-decoration: none; }
+
+/* Stamps */
+.stamp { display: inline-flex; align-items: center; gap: 7px; padding: 5px 9px 5px 7px; font: 600 11px/1 var(--mono); letter-spacing: .09em; text-transform: uppercase; white-space: nowrap; }
+.stamp .px-icon { width: 16px; height: 16px; }
+
+/* ---------- Direction A tokens (fixed art palette; not theme-dependent) ---------- */
+.dir-a {
+  --a-ink: #25222f; --a-ink0: #17141f; --a-paper: #fbf5e8; --a-paper2: #f2e4c8; --a-plaster: #e2c9a2;
+  --a-walnut: #5c3a2c; --a-walnut2: #7f513a; --a-oak: #a3714d; --a-lamp: #f0a640; --a-lamp2: #ffd27a; --a-brass: #b86a2a;
+  --a-sage: #617a57; --a-buy: #2f78b4; --a-buy-l: #d7e8f6; --a-sell: #d4782c; --a-sell-d: #8a4519; --a-sell-l: #fbe3cc;
+  --a-bp: #284a73; --a-bp-l: #9cc0e6; --a-alert: #b8322c; --a-unc: #7d5bb0;
+}
+.dir-a .hud .wordmark, .dir-a .tag-label { background: var(--a-paper); color: var(--a-ink); box-shadow: 0 0 0 2px var(--a-ink0), 4px 4px 0 2px rgba(23,20,31,.55); }
+.dir-a .hud .proto { background: var(--a-ink0); color: var(--a-lamp2); }
+.dir-a .start-card { background: var(--a-paper); color: var(--a-ink); box-shadow: 0 0 0 2px var(--a-ink0), 0 0 0 6px var(--a-walnut2), 0 0 0 8px var(--a-ink0), 8px 10px 0 8px rgba(23,20,31,.45); }
+.dir-a .start-card .k { color: var(--a-brass); }
+.dir-a .btn-primary { background: var(--a-lamp); color: var(--a-ink0); box-shadow: 0 0 0 2px var(--a-ink0), 0 4px 0 2px var(--a-ink0); }
+.dir-a .btn-primary:hover { background: var(--a-lamp2); transform: translateY(-2px); box-shadow: 0 0 0 2px var(--a-ink0), 0 6px 0 2px var(--a-ink0); }
+.dir-a .btn-primary:active { transform: translateY(2px); box-shadow: 0 0 0 2px var(--a-ink0), 0 2px 0 2px var(--a-ink0); }
+.dir-a .btn-quiet { background: transparent; color: var(--a-ink); padding: 8px 0; text-decoration: underline; text-underline-offset: 4px; }
+.dir-a .hotspot:focus-visible + .tag-label { box-shadow: 0 0 0 2px var(--a-ink0), 0 0 0 5px var(--a-lamp2), 0 0 0 7px var(--a-ink0); }
+.dir-a .stamp-public { background: var(--a-paper); color: var(--a-ink); box-shadow: 0 0 0 2px var(--a-ink0); border-radius: 999px; }
+.dir-a .stamp-run { background: var(--a-buy-l); color: var(--a-ink); box-shadow: 0 0 0 2px var(--a-ink0); clip-path: polygon(10px 0, 100% 0, 100% 100%, 10px 100%, 0 50%); padding-left: 14px; }
+.dir-a .stamp-rec { background: var(--a-ink); color: var(--a-paper); box-shadow: 0 0 0 2px var(--a-ink0); }
+.dir-a .stamp-sch { background: var(--a-bp); color: #eef5ff; outline: 2px dashed var(--a-bp-l); outline-offset: -5px; padding: 7px 11px 7px 9px; }
+.dir-a .stamp-ev { background: var(--a-paper2); color: var(--a-ink); box-shadow: 0 0 0 2px var(--a-ink0), inset 4px 0 0 var(--a-sage); padding-left: 11px; }
+.dir-a .stamp-proto { background: repeating-linear-gradient(-45deg, var(--a-lamp2) 0 8px, var(--a-paper) 8px 16px); color: var(--a-ink0); box-shadow: 0 0 0 2px var(--a-ink0); }
+.dir-a .stamp-stale { background: #d9d4cc; color: #4a4552; box-shadow: 0 0 0 2px #4a4552; border-radius: 999px; }
+
+/* ---------- Direction B tokens ---------- */
+.dir-b {
+  --b-ink0: #0b0d1a; --b-ink1: #141833; --b-ink2: #1f2547; --b-nav: #39418a; --b-nav2: #5560b0; --b-paper: #d8d4f0;
+  --b-amber: #f2a03d; --b-amber2: #ffd58a; --b-phos: #3fd1a8; --b-phos2: #b8ffe6; --b-phos0: #1f6e5e;
+  --b-buy: #4aa3ff; --b-sell: #ff9e4a; --b-alert: #e0457b;
+}
+.dir-b .hud .wordmark, .dir-b .tag-label { background: var(--b-ink1); color: var(--b-phos2); box-shadow: 0 0 0 2px var(--b-phos0), 0 0 0 4px var(--b-ink0); }
+.dir-b .hud .proto { background: var(--b-amber); color: var(--b-ink0); }
+.dir-b .start-card { background: var(--b-ink1); color: var(--b-paper); box-shadow: 0 0 0 2px var(--b-phos0), 0 0 0 4px var(--b-ink0), 0 0 24px 4px rgba(63,209,168,.18); }
+.dir-b .start-card .k { color: var(--b-phos); }
+.dir-b .btn-primary { background: var(--b-phos); color: var(--b-ink0); box-shadow: 0 0 0 2px var(--b-ink0), 0 0 0 4px var(--b-phos0); }
+.dir-b .btn-primary:hover { background: var(--b-phos2); }
+.dir-b .btn-quiet { background: transparent; color: var(--b-paper); padding: 8px 0; text-decoration: underline; text-underline-offset: 4px; }
+.dir-b .hotspot:focus-visible + .tag-label { box-shadow: 0 0 0 2px var(--b-ink0), 0 0 0 5px var(--b-amber2); }
+.dir-b .stamp-public { background: var(--b-ink2); color: var(--b-phos2); box-shadow: 0 0 0 2px var(--b-phos0); border-radius: 999px; }
+.dir-b .stamp-run { background: #1d3557; color: #dbeeff; box-shadow: 0 0 0 2px var(--b-buy); clip-path: polygon(10px 0, 100% 0, 100% 100%, 10px 100%, 0 50%); padding-left: 14px; }
+.dir-b .stamp-rec { background: var(--b-paper); color: var(--b-ink0); }
+.dir-b .stamp-sch { background: #183457; color: #dcecff; outline: 2px dashed #7fb2ec; outline-offset: -5px; padding: 7px 11px 7px 9px; }
+.dir-b .stamp-ev { background: var(--b-ink2); color: var(--b-paper); box-shadow: 0 0 0 2px var(--b-nav2), inset 4px 0 0 var(--b-phos); padding-left: 11px; }
+.dir-b .stamp-proto { background: repeating-linear-gradient(-45deg, var(--b-amber) 0 8px, var(--b-amber2) 8px 16px); color: var(--b-ink0); }
+
+/* ---------- Lesson workspace (shared structure, themed per direction) ---------- */
+.ws { position: absolute; inset: 0; display: grid; grid-template-rows: 60px 28px 36px 1fr 68px; font-family: var(--body); }
+.ws-top { display: flex; align-items: center; gap: 16px; padding: 0 20px; }
+.ws-top .crumb { flex: 1; min-width: 0; font: 500 14px/1.2 var(--body); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ws-top .crumb span { opacity: .55; padding: 0 6px; }
+.ws-top .crumb b { font-weight: 600; }
+.ws-tool { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; font: 600 13px/1 var(--body); border: 0; cursor: pointer; }
+.ws-proto { display: flex; align-items: center; justify-content: center; gap: 10px; font: 600 11px/1 var(--mono); letter-spacing: .12em; }
+.ws-context { margin: 0; display: flex; align-items: center; padding: 0 20px; font: 400 14px/1.3 var(--body); }
+.ws-body { display: grid; grid-template-columns: 1fr 380px; gap: 16px; padding: 14px 20px; min-height: 0; }
+.ws-board { position: relative; display: grid; grid-template-rows: 44px 1fr; min-height: 0; }
+.ws-board-head { display: flex; align-items: center; justify-content: space-between; padding: 0 14px; }
+.ws-board-head h3 { margin: 0; font: 600 16px/1 var(--body); }
+.lens-tabs { display: flex; gap: 4px; }
+.lens-tab { font: 600 12px/1 var(--mono); letter-spacing: .06em; padding: 8px 12px; border: 0; cursor: pointer; }
+.lens { position: relative; padding: 14px; min-height: 0; }
+.ladder { display: grid; grid-template-columns: 150px 84px 1fr 186px; grid-template-rows: auto repeat(2, 66px) 30px repeat(2, 54px); gap: 6px 10px; align-items: center; }
+.ladder .colh { font: 600 10px/1 var(--mono); letter-spacing: .1em; opacity: .75; }
+.price { font: 600 16px/1 var(--mono); font-variant-numeric: tabular-nums; display: flex; gap: 6px; align-items: center; }
+.price small { font: 600 10px/1 var(--mono); letter-spacing: .06em; }
+.orders { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.ocard { position: relative; display: grid; gap: 3px; padding: 7px 10px; min-width: 96px; font: 500 12px/1.15 var(--mono); }
+.ocard b { font: 600 15px/1 var(--mono); }
+.ocard .st { font: 600 10px/1 var(--mono); letter-spacing: .06em; }
+.ocard.small { min-width: 64px; padding: 6px 9px; }
+.spreadrow { grid-column: 2 / 4; display: flex; align-items: center; gap: 10px; font: 600 11px/1 var(--mono); letter-spacing: .08em; }
+.spreadrow::before, .spreadrow::after { content: ""; height: 2px; flex: 1; }
+.incoming { grid-column: 1; grid-row: 3; position: relative; }
+.incard { margin-right: 22px; padding: 8px 10px; font: 500 12px/1.25 var(--mono); }
+.incard b { display: block; font: 600 14px/1.2 var(--mono); }
+.rail-arrow { position: absolute; right: 0; top: 50%; transform: translateY(-50%); font: 600 18px/1 var(--mono); }
+.trades { grid-column: 4; grid-row: 2 / span 5; align-self: start; display: grid; gap: 8px; }
+.slip { padding: 8px 10px; font: 500 12px/1.3 var(--mono); }
+.slip b { font-weight: 600; }
+.firstline { position: absolute; font: 600 10px/1 var(--mono); letter-spacing: .08em; top: -22px; left: 0; white-space: nowrap; }
+.board-stamp { position: absolute; right: 14px; bottom: 12px; }
+.ws-side { display: grid; align-content: start; gap: 12px; padding: 16px 18px; min-height: 0; overflow: hidden; }
+.ws-side .k { font: 600 11px/1 var(--mono); letter-spacing: .1em; }
+.ws-side h3 { margin: 0; font: 600 20px/1.25 var(--body); }
+.ws-side p { margin: 0; font-size: 14px; line-height: 1.5; }
+.pred { display: flex; align-items: center; gap: 10px; padding: 10px 12px; font: 500 13px/1.3 var(--body); }
+.pred b { font-family: var(--mono); }
+.ws-side .actions { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+.ws-side .fine { font-size: 12px; opacity: .8; }
+.ws-manual { padding: 16px 18px; display: grid; align-content: start; gap: 10px; overflow: hidden; }
+.ws-manual blockquote { margin: 0; padding: 10px 12px; font: 500 14px/1.45 var(--body); }
+.ws-manual .src { font: 500 11px/1.3 var(--mono); }
+.ws-manual h4 { margin: 4px 0 0; font: 600 13px/1.2 var(--body); }
+.ws-manual p { margin: 0; font-size: 13.5px; line-height: 1.5; }
+.ws-rail { display: flex; align-items: center; gap: 14px; padding: 0 20px; }
+.steps { flex: 1; display: flex; gap: 6px; align-items: center; justify-content: center; }
+.step { display: flex; align-items: center; gap: 6px; font: 600 11px/1 var(--mono); letter-spacing: .04em; padding: 6px 8px; }
+.step i { width: 10px; height: 10px; display: inline-block; }
+.speed { display: flex; align-items: center; gap: 8px; font: 500 12px/1.2 var(--body); }
+.speed small { display: block; opacity: .7; font-size: 11px; }
+/* machine lens */
+.pipe { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0; margin-top: 30px; position: relative; }
+.stagebox { position: relative; display: grid; gap: 6px; justify-items: center; text-align: center; padding: 0 6px; }
+.stagebox .house { width: 100px; height: 72px; display: grid; place-items: center; font: 600 12px/1.15 var(--mono); position: relative; }
+.stagebox .ev { font: 500 11.5px/1.35 var(--mono); max-width: 120px; }
+.stagebox .tube { position: absolute; top: 33px; right: -18%; width: 36%; height: 8px; }
+.stagebox:last-child .tube { display: none; }
+.token { position: absolute; top: -26px; left: 50%; transform: translateX(-50%); padding: 4px 8px; font: 600 11px/1 var(--mono); white-space: nowrap; }
+.machine-notes { margin-top: 26px; display: grid; gap: 8px; font-size: 13px; line-height: 1.45; max-width: 640px; }
+/* structure lens */
+.struct { display: grid; grid-template-columns: 1fr 260px; gap: 18px; margin-top: 8px; }
+.shelf { display: grid; gap: 10px; }
+.level { display: flex; align-items: center; gap: 10px; padding: 8px 10px; }
+.level .lp { font: 600 14px/1 var(--mono); width: 70px; }
+.chain { display: flex; align-items: center; gap: 4px; }
+.node { padding: 6px 9px; font: 600 12px/1.1 var(--mono); }
+.link { font: 600 14px/1 var(--mono); }
+.drawer { padding: 10px 12px; font: 500 12px/1.5 var(--mono); }
+.drawer h4 { margin: 0 0 6px; font: 600 12px/1.2 var(--body); }
+
+/* Direction A workspace skin */
+.dir-a .ws { background: var(--a-walnut); color: var(--a-ink); }
+.dir-a .ws-top { background: var(--a-ink0); color: var(--a-paper); }
+.dir-a .ws-tool { background: var(--a-walnut); color: var(--a-paper); box-shadow: 0 0 0 2px #3e2620; }
+.dir-a .ws-tool:hover { background: var(--a-walnut2); }
+.dir-a .ws-proto { background: repeating-linear-gradient(-45deg, var(--a-lamp2) 0 10px, var(--a-paper) 10px 20px); color: var(--a-ink0); }
+.dir-a .ws-context { background: var(--a-paper2); color: var(--a-ink); border-bottom: 2px solid var(--a-ink0); }
+.dir-a .ws-board { background: var(--cork-a) var(--a-oak); background-size: 64px 64px; image-rendering: pixelated; box-shadow: 0 0 0 4px var(--a-walnut2), 0 0 0 6px var(--a-ink0), 6px 6px 0 6px rgba(23,20,31,.5); }
+.dir-a .ws-board-head { background: var(--a-paper); box-shadow: 0 2px 0 var(--a-ink0); }
+.dir-a .lens-tab { background: var(--a-paper2); color: var(--a-ink); box-shadow: 0 0 0 2px var(--a-ink0); }
+.dir-a .lens-tab[aria-selected="true"] { background: var(--a-ink); color: var(--a-paper); }
+.dir-a .price { color: var(--a-paper); text-shadow: 0 2px 0 var(--a-ink0); }
+.dir-a .price small { padding: 3px 5px; text-shadow: none; }
+.dir-a .ask small { background: var(--a-sell); color: var(--a-ink0); }
+.dir-a .bid small { background: var(--a-buy); color: #fff; }
+.dir-a .colh { color: var(--a-paper); }
+.dir-a .ocard { background: var(--a-paper); color: var(--a-ink); box-shadow: 0 0 0 2px var(--a-ink0), 3px 3px 0 2px rgba(23,20,31,.5); }
+.dir-a .ocard.sell { border-top: 6px solid var(--a-sell); }
+.dir-a .ocard.buy { border-top: 6px solid var(--a-buy); }
+.dir-a .ocard.done { background: #e6dccb; color: #5d5662; }
+.dir-a .ocard.done .st { color: var(--a-sage); }
+.dir-a .ocard.part .st { color: var(--a-sell-d); }
+.dir-a .ocard.focus { box-shadow: 0 0 0 2px var(--a-ink0), 0 0 0 5px var(--a-lamp2), 0 0 0 7px var(--a-ink0); }
+.dir-a .spreadrow { color: var(--a-paper); }
+.dir-a .spreadrow::before, .dir-a .spreadrow::after { background: repeating-linear-gradient(90deg, var(--a-paper) 0 6px, transparent 6px 12px); }
+.dir-a .incard { background: var(--a-buy-l); color: var(--a-ink); box-shadow: 0 0 0 2px var(--a-ink0), 3px 3px 0 2px rgba(23,20,31,.5); border-top: 6px solid var(--a-buy); }
+.dir-a .rail-arrow { color: var(--a-lamp2); text-shadow: 0 2px 0 var(--a-ink0); }
+.dir-a .slip { background: var(--a-paper); box-shadow: 0 0 0 2px var(--a-ink0); border-left: 6px solid var(--a-lamp); }
+.dir-a .firstline { color: var(--a-lamp2); text-shadow: 0 2px 0 var(--a-ink0); }
+.dir-a .ws-side, .dir-a .ws-manual { background: var(--a-paper); box-shadow: 0 0 0 2px var(--a-ink0), 6px 6px 0 2px rgba(23,20,31,.45); }
+.dir-a .ws-side .k { color: var(--a-brass); }
+.dir-a .pred { background: #e8f0e0; box-shadow: inset 4px 0 0 var(--a-sage); }
+.dir-a .ws-manual blockquote { background: var(--a-paper2); box-shadow: inset 4px 0 0 var(--a-ink); }
+.dir-a .ws-rail { background: var(--a-ink0); color: var(--a-paper); }
+.dir-a .step { color: #b9ad9b; }
+.dir-a .step i { background: #5b5466; }
+.dir-a .step.done i { background: var(--a-sage); }
+.dir-a .step.now { background: var(--a-paper); color: var(--a-ink); }
+.dir-a .step.now i { background: var(--a-lamp); }
+.dir-a .house { background: var(--a-walnut2); color: var(--a-paper); box-shadow: 0 0 0 2px var(--a-ink0), inset 0 0 0 4px var(--a-brass); }
+.dir-a .house.now { background: var(--a-lamp); color: var(--a-ink0); }
+.dir-a .stagebox .ev { color: var(--a-paper); }
+.dir-a .tube { background: var(--a-paper2); box-shadow: 0 0 0 2px var(--a-brass); }
+.dir-a .token { background: var(--a-buy-l); color: var(--a-ink); box-shadow: 0 0 0 2px var(--a-ink0); }
+.dir-a .machine-notes { color: var(--a-paper); }
+.dir-a .level { background: rgba(40,74,115,.92); color: #eef5ff; outline: 2px dashed var(--a-bp-l); outline-offset: -4px; }
+.dir-a .node { background: #eef5ff; color: var(--a-bp); }
+.dir-a .drawer { background: rgba(40,74,115,.92); color: #eef5ff; outline: 2px dashed var(--a-bp-l); outline-offset: -4px; }
+
+/* Direction B workspace skin */
+.dir-b .ws { background: var(--b-ink0); color: var(--b-paper); }
+.dir-b .ws-top { background: var(--b-ink1); color: var(--b-paper); box-shadow: 0 2px 0 var(--b-ink2); }
+.dir-b .ws-tool { background: var(--b-ink2); color: var(--b-phos2); box-shadow: 0 0 0 2px var(--b-phos0); }
+.dir-b .ws-proto { background: var(--b-amber); color: var(--b-ink0); }
+.dir-b .ws-context { color: #b5b9da; }
+.dir-b .ws-board { background: var(--grid-b) var(--b-ink1); background-size: 32px 32px; box-shadow: 0 0 0 2px var(--b-phos0), 0 0 30px rgba(63,209,168,.12) inset; }
+.dir-b .ws-board-head { background: rgba(20,24,51,.9); box-shadow: 0 2px 0 var(--b-ink2); color: var(--b-phos2); }
+.dir-b .lens-tab { background: var(--b-ink2); color: var(--b-paper); }
+.dir-b .lens-tab[aria-selected="true"] { background: var(--b-phos); color: var(--b-ink0); }
+.dir-b .price { color: var(--b-paper); }
+.dir-b .price small { padding: 3px 5px; }
+.dir-b .ask small { background: var(--b-sell); color: var(--b-ink0); }
+.dir-b .bid small { background: var(--b-buy); color: var(--b-ink0); }
+.dir-b .colh { color: #9aa0c8; }
+.dir-b .ocard { background: var(--b-ink2); color: var(--b-paper); box-shadow: 0 0 0 2px var(--b-nav2); }
+.dir-b .ocard.sell { box-shadow: 0 0 0 2px var(--b-sell); }
+.dir-b .ocard.buy { box-shadow: 0 0 0 2px var(--b-buy); }
+.dir-b .ocard.done { opacity: .62; }
+.dir-b .ocard.done .st { color: var(--b-phos); }
+.dir-b .ocard.part .st { color: var(--b-sell); }
+.dir-b .ocard.focus { box-shadow: 0 0 0 2px var(--b-sell), 0 0 0 5px var(--b-amber2), 0 0 16px 4px rgba(255,213,138,.35); }
+.dir-b .spreadrow { color: #9aa0c8; }
+.dir-b .spreadrow::before, .dir-b .spreadrow::after { background: repeating-linear-gradient(90deg, var(--b-nav2) 0 6px, transparent 6px 12px); }
+.dir-b .incard { background: #12294a; color: #dbeeff; box-shadow: 0 0 0 2px var(--b-buy), 0 0 14px rgba(74,163,255,.35); }
+.dir-b .rail-arrow { color: var(--b-buy); }
+.dir-b .slip { background: var(--b-ink2); box-shadow: inset 4px 0 0 var(--b-phos); }
+.dir-b .firstline { color: var(--b-amber2); }
+.dir-b .ws-side, .dir-b .ws-manual { background: var(--b-ink1); box-shadow: 0 0 0 2px var(--b-ink2); }
+.dir-b .ws-side .k { color: var(--b-phos); }
+.dir-b .pred { background: rgba(63,209,168,.12); box-shadow: inset 4px 0 0 var(--b-phos); }
+.dir-b .ws-manual blockquote { background: var(--b-ink2); box-shadow: inset 4px 0 0 var(--b-phos); }
+.dir-b .ws-rail { background: var(--b-ink1); box-shadow: 0 -2px 0 var(--b-ink2); }
+.dir-b .step { color: #8a90bb; }
+.dir-b .step i { background: var(--b-ink2); box-shadow: 0 0 0 1px var(--b-nav2); }
+.dir-b .step.done i { background: var(--b-phos0); }
+.dir-b .step.now { background: var(--b-ink2); color: var(--b-phos2); }
+.dir-b .step.now i { background: var(--b-phos); }
+.dir-b .house { background: var(--b-ink2); color: var(--b-paper); box-shadow: 0 0 0 2px var(--b-nav2); }
+.dir-b .house.now { background: var(--b-phos0); color: var(--b-phos2); box-shadow: 0 0 0 2px var(--b-phos), 0 0 18px rgba(63,209,168,.4); }
+.dir-b .tube { background: var(--b-ink2); box-shadow: 0 0 0 1px var(--b-nav2); }
+.dir-b .token { background: #12294a; color: #dbeeff; box-shadow: 0 0 0 2px var(--b-buy); }
+.dir-b .machine-notes { color: #b5b9da; }
+.dir-b .level { background: #183457; color: #dcecff; outline: 2px dashed #7fb2ec; outline-offset: -4px; }
+.dir-b .node { background: #dcecff; color: #183457; }
+.dir-b .drawer { background: #183457; color: #dcecff; outline: 2px dashed #7fb2ec; outline-offset: -4px; }
+
+/* Comparison table */
+.table-wrap { overflow-x: auto; margin: 16px 0; }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 14px; background: var(--sheet); }
+th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--rule); }
+th { font: 600 12px/1.3 var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+td.win { font-weight: 600; }
+
+/* Stamp + state sheets */
+.sheet { padding: 24px; background: #3e2620; display: grid; gap: 20px; }
+.sheet-row { display: flex; flex-wrap: wrap; gap: 14px 18px; align-items: center; }
+.sheet .cap { color: #f2e4c8; font: 600 11px/1 var(--mono); letter-spacing: .1em; width: 100%; }
+.stamp-def { display: grid; gap: 8px; align-content: start; width: 220px; color: #f2e4c8; font-size: 13px; line-height: 1.45; }
+.states { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.state { background: #fbf5e8; color: #25222f; box-shadow: 0 0 0 2px #17141f; display: grid; grid-template-rows: auto auto 1fr; min-width: 0; }
+.state canvas { width: 100%; aspect-ratio: 80 / 44; image-rendering: pixelated; display: block; }
+.state .sh { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 10px 0; flex-wrap: wrap; }
+.state .sh b { font: 600 12px/1.2 var(--mono); letter-spacing: .06em; }
+.state p { padding: 6px 10px 12px; margin: 0; font-size: 13px; line-height: 1.45; }
+@media (max-width: 900px) { .states { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+@media (max-width: 560px) { .states { grid-template-columns: minmax(0, 1fr); } }
+.btnstates { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-end; }
+.btnstates figure { margin: 0; display: grid; gap: 8px; justify-items: start; }
+.btnstates figcaption { color: #f2e4c8; font: 600 11px/1 var(--mono); letter-spacing: .08em; margin: 0; }
+.fake-hover { background: var(--a-lamp2) !important; transform: translateY(-2px); box-shadow: 0 0 0 2px var(--a-ink0), 0 6px 0 2px var(--a-ink0) !important; }
+.fake-focus { box-shadow: 0 0 0 2px var(--a-ink0), 0 4px 0 2px var(--a-ink0), 0 0 0 5px var(--a-lamp2), 0 0 0 7px var(--a-ink0) !important; }
+.fake-press { transform: translateY(2px); box-shadow: 0 0 0 2px var(--a-ink0), 0 2px 0 2px var(--a-ink0) !important; }
+.fake-sel { background: var(--a-ink) !important; color: var(--a-paper) !important; }
+.fake-dis { background: #cfc6b8 !important; color: #6b6470 !important; box-shadow: 0 0 0 2px #6b6470 !important; cursor: not-allowed; }
+
+/* Palette + scale */
+.ramps { display: grid; gap: 10px; margin-top: 12px; }
+.ramp { display: grid; grid-template-columns: 140px 1fr; gap: 12px; align-items: center; }
+.ramp > span { font: 600 12px/1.2 var(--mono); }
+.sw { display: flex; flex-wrap: wrap; gap: 4px; }
+.sw div { width: 64px; height: 40px; display: flex; align-items: flex-end; padding: 3px 4px; font: 500 10px/1 var(--mono); box-shadow: inset 0 0 0 1px rgba(0,0,0,.15); }
+@media (max-width: 560px) { .ramp { grid-template-columns: minmax(0, 1fr); } }
+.scalebox { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-end; margin-top: 12px; }
+.scalebox figure { margin: 0; }
+.scalebox canvas { image-rendering: pixelated; display: block; background: #e2c9a2; }
+.specs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+.specs > div { background: var(--sheet); border: 1px solid var(--rule); padding: 14px 16px; min-width: 0; font-size: 14px; }
+.specs h4 { margin: 0 0 6px; font: 600 12px/1.2 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+.specs ul { margin: 0; padding-left: 18px; }
+@media (max-width: 760px) { .specs { grid-template-columns: minmax(0, 1fr); } }
+
+/* Journey */
+.journey { list-style: none; margin: 16px 0 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; counter-reset: j; }
+.journey li { background: var(--sheet); border: 1px solid var(--rule); padding: 14px; counter-increment: j; min-width: 0; font-size: 14px; line-height: 1.5; }
+.journey li::before { content: counter(j); display: inline-grid; place-items: center; width: 26px; height: 26px; margin-bottom: 8px; background: var(--ink); color: var(--page); font: 400 13px/1 var(--display); }
+.journey b { display: block; font-size: 15px; margin-bottom: 4px; }
+.journey .where { display: block; font: 600 11px/1.3 var(--mono); letter-spacing: .06em; color: var(--accent); margin-top: 8px; }
+@media (max-width: 1000px) { .journey { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .journey { grid-template-columns: minmax(0, 1fr); } }
+.criteria { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+.criteria > div { background: var(--sheet); border: 1px solid var(--rule); padding: 14px 16px; font-size: 14px; min-width: 0; }
+.criteria h4 { margin: 0 0 6px; font: 400 14px/1.2 var(--display); }
+.criteria ul { margin: 0; padding-left: 18px; }
+@media (max-width: 760px) { .criteria { grid-template-columns: minmax(0, 1fr); } }
+.gaps { background: var(--note); padding: 14px 16px; margin-top: 16px; font-size: 14px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .stage-inner.pushing canvas.world { animation: none; }
+  .tag-label { transition: none; }
+}
+.reduced .stage-inner.pushing canvas.world { animation: none; }
+</style>
+
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Exchange Lab · frontend review · first design pass</p>
+    <h1>Direction Proofs</h1>
+    <p class="lede prose">Two art directions for the exchange laboratory, each shown as a home scene and the same lesson step. The structure, words, and controls stay identical so only the art treatment is compared.</p>
+    <div class="banner"><b>PROPOSAL · SAMPLE DATA</b><span>Nothing here is adopted, implemented, or drawn from engine evidence. Rationale and acceptance criteria are in <code>docs/frontend-experience-review.md</code>.</span></div>
+    <div class="controls" aria-label="Page controls">
+      <span>Motion:</span>
+      <button class="chipbtn" id="motion-toggle" type="button" aria-pressed="false">Reduce motion</button>
+      <span style="margin-left:12px">Scenes are drawn on a 320 × 180 grid and shown at exactly 4× when this column is 1280 px wide.</span>
+    </div>
+    <ul class="toc">
+      <li><a href="#structure">Structure</a></li>
+      <li><a href="#direction-a">A · Lamplight Workshop</a></li>
+      <li><a href="#direction-b">B · Night Signal Room</a></li>
+      <li><a href="#compare">Comparison</a></li>
+      <li><a href="#stamps">Stamps and states</a></li>
+      <li><a href="#assets">Asset plan</a></li>
+      <li><a href="#journey">Prototype journey</a></li>
+    </ul>
+  </header>
+
+  <section class="part" id="structure" aria-labelledby="structure-h">
+    <p class="eyebrow">Recommended structure</p>
+    <h2 id="structure-h">Places hold data. Lenses change the view.</h2>
+    <p class="prose">The blueprint made Engine and Field manual into destinations. That forces people to leave the market to understand it. Here, a place is defined by where its data comes from, and every place offers the same lenses on the selected object.</p>
+    <div class="map">
+      <div>
+        <span class="tag">PLACES · ONE DATA SOURCE EACH</span>
+        <h4>Lessons</h4>
+        <ul><li>Recorded evidence from generated-only runs</li><li>May show individual scripted orders</li><li>Home object: cork board</li></ul>
+        <h4 style="margin-top:12px">Public market</h4>
+        <ul><li>Live <code>/v1/public</code> stream of the demo</li><li>Aggregate levels and sanitized trades only</li><li>Home object: the board across the street</li></ul>
+        <h4 style="margin-top:12px">My run</h4>
+        <ul><li>Your isolated run and private stream</li><li>Invite required; opens only on click</li><li>Home object: the door with a key tag</li></ul>
+      </div>
+      <div>
+        <span class="tag">LENSES · INSIDE ANY PLACE</span>
+        <h4>Market</h4>
+        <ul><li>Book, levels, trades</li><li>Raw orders only in Lessons</li></ul>
+        <h4 style="margin-top:12px">Machine</h4>
+        <ul><li>Command path for the selected object</li><li>Starts at Generator or Gateway, depending on where the command really entered</li><li>Public market: run-level status only</li></ul>
+        <h4 style="margin-top:12px">Structure</h4>
+        <ul><li>Price levels, FIFO, active-order lookup</li><li>Always stamped Schematic unless it is a real capture</li></ul>
+      </div>
+      <div>
+        <span class="tag">OVERLAYS · NEVER COVER THE SELECTION</span>
+        <h4>Field manual</h4>
+        <ul><li>Opens beside the work at the relevant page</li><li>Never locked behind progress</li></ul>
+        <h4 style="margin-top:12px">Comparison drawer</h4>
+        <ul><li>This exchange · named venue · hypothetical · not publicly known</li><li>Empty until a dated primary source is verified</li></ul>
+        <h4 style="margin-top:12px">Settings</h4>
+        <ul><li>Motion, sound, text size, single-key shortcuts</li></ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="part dir-a" id="direction-a" aria-labelledby="a-h">
+    <p class="eyebrow">Direction A · recommended</p>
+    <h2 id="a-h">Lamplight Workshop</h2>
+    <p class="prose">A small exchange workshop at dusk, drawn in front elevation. The room's materials carry the concepts: the journal is a ledger, a queue is a row of pinned index cards, schematics are blueprint sheets, public data is on a board across the street, and your own run is behind your own door.</p>
+    <figure>
+      <div class="stage" id="stage-a"><div class="stage-inner">
+        <canvas class="world" id="home-a" width="320" height="180" aria-hidden="true"></canvas>
+        <div class="hud" id="hud-a"></div>
+      </div></div>
+      <figcaption><b>Home scene.</b> Tab through the labelled objects; hover and focus raise the label and outline the object. One primary action. The covered bench under the window is scenery for later incident lessons and is not interactive. The street board blinks only while the public stream is live.</figcaption>
+    </figure>
+    <figure>
+      <div class="stage" id="ws-a"><div class="stage-inner"></div></div>
+      <figcaption><b>Lesson workspace, step 4 of 7.</b> Try the Market, Machine and Structure lenses and the Field manual button. The selected order stays in place when the manual opens. The step rail's hourglass changes animation speed only.</figcaption>
+    </figure>
+  </section>
+
+  <section class="part dir-b" id="direction-b" aria-labelledby="b-h">
+    <p class="eyebrow">Direction B · alternative</p>
+    <h2 id="b-h">Night Signal Room</h2>
+    <p class="prose">A compact isometric control room at night, shown as a floating diorama. Rain on the window, phosphor monitors, one warm lamp. The lesson becomes an illuminated schematic table.</p>
+    <figure>
+      <div class="stage" id="stage-b"><div class="stage-inner">
+        <canvas class="world" id="home-b" width="320" height="180" aria-hidden="true"></canvas>
+        <div class="hud" id="hud-b"></div>
+      </div></div>
+      <figcaption><b>Home scene.</b> Same three places and the same primary action. Isometric objects need 2:1 edges and consistent heights on every sprite, and labels cannot sit on the angled walls.</figcaption>
+    </figure>
+    <figure>
+      <div class="stage" id="ws-b"><div class="stage-inner"></div></div>
+      <figcaption><b>Lesson workspace, same step.</b> The structure is identical. Glow does the work that paper and shadow do in A, which makes it harder to keep emphasis on one object.</figcaption>
+    </figure>
+  </section>
+
+  <section class="part" id="compare" aria-labelledby="compare-h">
+    <p class="eyebrow">Tradeoffs</p>
+    <h2 id="compare-h">Why A</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Concern</th><th>A · Lamplight Workshop</th><th>B · Night Signal Room</th></tr></thead>
+      <tbody>
+        <tr><td>Recognizable identity</td><td class="win">Warm workshop with paper, brass and a street outside. Uncommon for finance tools.</td><td>Phosphor on navy is close to generic terminal and crypto styling.</td></tr>
+        <tr><td>Concept fit</td><td class="win">Ledger = journal, index cards = FIFO, blueprints = schematics, street board = public, door = private.</td><td>Strong for the Machine lens; weak for the manual, journal and privacy metaphors.</td></tr>
+        <tr><td>Reading long text</td><td class="win">Ink on paper panels; high contrast without glow.</td><td>Light text on dark panels; fine, but tiring for the manual.</td></tr>
+        <tr><td>Production cost</td><td class="win">Front elevation: rectangles, straight rails, simple token motion.</td><td>Isometric: roughly double the work per object; 2:1 drift is easy to introduce.</td></tr>
+        <tr><td>Emphasis control</td><td class="win">Value contrast and shadow mark the selected object.</td><td>Glow is the default emphasis and tends to spread.</td></tr>
+        <tr><td>Dark mode</td><td>Needs a separate lamp-only lighting pass.</td><td class="win">Native.</td></tr>
+        <tr><td>Sense of a running system</td><td>Has to come from stamps and the live street board.</td><td class="win">Monitors and lights read as "on" immediately.</td></tr>
+      </tbody>
+    </table></div>
+    <p class="prose"><b>Recommendation:</b> adopt A. Use B's blueprint styling for everything stamped Schematic and its night lighting as the basis for A's dark theme.</p>
+  </section>
+
+  <section class="part dir-a" id="stamps" aria-labelledby="stamps-h">
+    <p class="eyebrow">Provenance and states · shown in Direction A</p>
+    <h2 id="stamps-h">Every view says what it is</h2>
+    <p class="prose">Each data panel carries one stamp. Stamps differ by shape, icon and words, so they survive grayscale and color-vision differences. The prototype banner cannot be dismissed.</p>
+    <div class="sheet">
+      <div class="sheet-row" id="stamp-row"></div>
+      <span class="cap">PUBLIC WINDOW STATES · SAME OBJECT, SIX CONDITIONS</span>
+      <div class="states" id="state-grid"></div>
+      <span class="cap">BUTTON STATES · 2× UI GRID</span>
+      <div class="btnstates" id="btn-states"></div>
+    </div>
+  </section>
+
+  <section class="part" id="assets" aria-labelledby="assets-h">
+    <p class="eyebrow">Asset plan · Direction A</p>
+    <h2 id="assets-h">Palette, scale and production</h2>
+    <p class="prose">Thirty-two colors in ramps. BUY is blue with ▲, SELL is orange with ▼; alert red appears only with a hazard pattern or icon; uncertain is violet and always dotted.</p>
+    <div class="ramps" id="ramps"></div>
+    <div class="scalebox" id="scalebox"></div>
+    <div class="specs">
+      <div><h4>Grid and perspective</h4><ul><li>World: 320 × 180, integer 4× at 1280 × 720 and 1440 × 900</li><li>UI: 2× grid; icons 10–16 art px</li><li>Front elevation; 2–4 px top faces; 16 px tiles</li><li>Never mix layers inside one object; text is never bitmap-scaled</li></ul></div>
+      <div><h4>Light</h4><ul><li>Warm key from the desk lamp, cool fill from the window</li><li>Palette-locked relighting with 4 × 4 ordered dither</li><li>Interactive objects one value step lighter at rest</li></ul></div>
+      <div><h4>Type</h4><ul><li>Silkscreen at 16 / 32 px for place names and headings only</li><li>IBM Plex Sans for body, 15 px minimum</li><li>IBM Plex Mono with tabular figures for prices, quantities, stamps</li><li>Self-host later; the C++ static server has no <code>.woff2</code> MIME type today</li></ul></div>
+      <div><h4>Formats and budget</h4><ul><li>Source: <code>.aseprite</code> or <code>.pxo</code>, kept out of the served tree</li><li>Runtime: 1× PNG sheets + JSON frames</li><li>Example config caps each static asset at 1 MiB; target under 200 KB per sheet, 1.5 MB first load</li></ul></div>
+    </div>
+    <div class="gaps prose"><b>Available this pass:</b> Python 3 with Pillow, HTML canvas, the browser pane. <b>Not available:</b> any image-generation tool, Aseprite, ImageMagick, or existing pixel sprites, fonts or sounds in the repository. Every image on this page is drawn procedurally from the palette as a layout and value study. Final scene art should be commissioned or hand-drawn.</div>
+  </section>
+
+  <section class="part" id="journey" aria-labelledby="journey-h">
+    <p class="eyebrow">Prototype scope</p>
+    <h2 id="journey-h">One complete journey: Who trades first?</h2>
+    <p class="prose">A static, offline prototype with one labelled sample fixture. It makes no network calls and leaves the C++ server and exchange behavior untouched. Asks: 100.04 × 2; 100.02 × 3 (A, seq 7) then 100.02 × 5 (B, seq 9). A scripted buyer sends BUY 4 @ 100.02 GTC. A fills 3, then B fills 1; B keeps 4.</p>
+    <ol class="journey">
+      <li><b>Arrive</b>One primary card: Start here. The window shows live, quiet or reconnecting via a developer toggle.<span class="where">HOME</span></li>
+      <li><b>Brief</b>Three sentences. Two sellers, one price, one buyer.<span class="where">LESSONS · RECORDED</span></li>
+      <li><b>Predict</b>Select order A, order B, or "they split it". Keyboard and list alternatives.<span class="where">MARKET LENS</span></li>
+      <li><b>Watch</b>The buyer card slides in. Two trade slips form in matching order.<span class="where">MARKET LENS</span></li>
+      <li><b>Why?</b>Outcome sentence first, then the manual opens beside the book at price-time priority.<span class="where">FIELD MANUAL</span></li>
+      <li><b>Look inside</b>Same buyer as a token: Generator, Admission, Sequence 12, Journal, Matching, Results.<span class="where">MACHINE LENS</span></li>
+      <li><b>Debrief</b>No score. One next lesson, "Try it in my run" with the privacy difference stated, Home.<span class="where">LESSONS</span></li>
+      <li><b>Return</b>Back lands on Home in one press, focus on the cork board, progress saved in this browser.<span class="where">HOME</span></li>
+    </ol>
+    <div class="criteria">
+      <div><h4>Navigation</h4><ul><li>Prediction within three actions of Home</li><li>Back exits the lesson in one press; steps use replaceState</li><li>Reload restores the step and saved prediction</li><li>Focus returns to the object you left from</li></ul></div>
+      <div><h4>Honesty</h4><ul><li>One stamp per data panel; prototype banner on every screen</li><li>No "your order" in a recorded lesson</li><li>Machine lens starts at Generator</li><li>Comparison drawer shows no venue claim until a source is verified</li></ul></div>
+      <div><h4>Access</h4><ul><li>Everything operable by keyboard in visual order</li><li>Visible focus on every surface</li><li>Reduced motion: fades only, ambient loops stop</li><li>Single-key shortcuts can be switched off; 4.5:1 text contrast; color never the only signal</li></ul></div>
+      <div><h4>Comprehension (5+ people)</h4><ul><li>4 of 5 explain why A traded first</li><li>4 of 5 say the lesson was recorded, not live</li><li>4 of 5 reach the manual entry unaided</li><li>Record time to first prediction and any search for Back</li></ul></div>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+'use strict';
+const BAYER = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+let reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* ---------- palettes ---------- */
+const A = {
+  ink0: '#17141f', ink1: '#25222f', ink2: '#3a3346',
+  wal0: '#3e2620', wal1: '#5c3a2c', wal2: '#7f513a', wal3: '#a3714d',
+  pl0: '#c9a983', pl1: '#e2c9a2', pl2: '#f2e4c8', pl3: '#fbf5e8',
+  lamp0: '#b86a2a', lamp1: '#f0a640', lamp2: '#ffd27a', lamp3: '#fff0c2',
+  sage0: '#3f5240', sage1: '#617a57', sage2: '#8fa77a',
+  sky0: '#2c3557', sky1: '#4a4d7c', sky2: '#8a6d93', sky3: '#d98b74',
+  buy0: '#1f4f7a', buy1: '#2f78b4', buy2: '#7fb4e0',
+  sell0: '#8a4519', sell1: '#d4782c', sell2: '#f2b072',
+  bp0: '#284a73', bp1: '#9cc0e6', alert: '#b8322c', unc: '#7d5bb0'
+};
+const B = {
+  ink0: '#0b0d1a', ink1: '#141833', ink2: '#1f2547', nav0: '#283066', nav1: '#39418a', nav2: '#5560b0',
+  wallL: '#232b57', wallR: '#2d3669', wallLo: '#1b2149', wallRo: '#222a58', floor: '#2e2a4a', floor2: '#3a3560', floorLit: '#5b4a5c',
+  amber0: '#a35a2a', amber1: '#f2a03d', amber2: '#ffd58a', phos0: '#1f6e5e', phos1: '#3fd1a8', phos2: '#b8ffe6',
+  buy: '#4aa3ff', sell: '#ff9e4a', alert: '#e0457b', wood: '#5a3a3a', wood2: '#7a5048', wood0: '#3d2630', paper: '#d8d4f0',
+  sage: '#4f7a5f', sage2: '#7fb08a'
+};
+
+/* ---------- pixel toolkit ---------- */
+function pix(canvas) {
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  const W = canvas.width, H = canvas.height;
+  const P = {
+    ctx, W, H,
+    r(x, y, w, h, c) { ctx.fillStyle = c; ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h)); },
+    p(x, y, c) { ctx.fillStyle = c; ctx.fillRect(Math.round(x), Math.round(y), 1, 1); },
+    hl(x, y, w, c) { P.r(x, y, w, 1, c); },
+    vl(x, y, h, c) { P.r(x, y, 1, h, c); },
+    frame(x, y, w, h, c) { P.hl(x, y, w, c); P.hl(x, y + h - 1, w, c); P.vl(x, y, h, c); P.vl(x + w - 1, y, h, c); },
+    dith(x, y, w, h, c, level) {
+      ctx.fillStyle = c;
+      for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
+        if (BAYER[(y + j) & 3][(x + i) & 3] < level) ctx.fillRect(x + i, y + j, 1, 1);
+      }
+    },
+    line(x0, y0, x1, y1, c) {
+      x0 = Math.round(x0); y0 = Math.round(y0); x1 = Math.round(x1); y1 = Math.round(y1);
+      const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+      let err = dx + dy;
+      for (;;) {
+        P.p(x0, y0, c);
+        if (x0 === x1 && y0 === y1) break;
+        const e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+      }
+    },
+    poly(pts, c) {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const [x, y] of pts) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
+      ctx.fillStyle = c;
+      for (let y = Math.max(0, Math.floor(minY)); y <= Math.min(H - 1, Math.ceil(maxY)); y++) {
+        for (let x = Math.max(0, Math.floor(minX)); x <= Math.min(W - 1, Math.ceil(maxX)); x++) {
+          if (inPoly(x + .5, y + .5, pts)) ctx.fillRect(x, y, 1, 1);
+        }
+      }
+    },
+    // Palette-locked relighting: swap mapped colors inside a dithered radial falloff.
+    relight(cx, cy, rx, ry, map) {
+      const img = ctx.getImageData(0, 0, W, H), d = img.data;
+      const m = new Map(Object.entries(map).map(([k, v]) => [hexInt(k), hexRgb(v)]));
+      for (let y = Math.max(0, Math.floor(cy - ry)); y < Math.min(H, cy + ry); y++) {
+        for (let x = Math.max(0, Math.floor(cx - rx)); x < Math.min(W, cx + rx); x++) {
+          const dist = Math.hypot((x - cx) / rx, (y - cy) / ry);
+          if (dist >= 1) continue;
+          const t = (1 - dist) * 2.2 * 16;
+          if (BAYER[y & 3][x & 3] >= t) continue;
+          const i = (y * W + x) * 4, key = (d[i] << 16) | (d[i + 1] << 8) | d[i + 2];
+          const to = m.get(key);
+          if (to) { d[i] = to[0]; d[i + 1] = to[1]; d[i + 2] = to[2]; }
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+    },
+    recolorRect(x0, y0, w, h, map) {
+      const img = ctx.getImageData(x0, y0, w, h), d = img.data;
+      const m = new Map(Object.entries(map).map(([k, v]) => [hexInt(k), hexRgb(v)]));
+      for (let i = 0; i < d.length; i += 4) {
+        const to = m.get((d[i] << 16) | (d[i + 1] << 8) | d[i + 2]);
+        if (to) { d[i] = to[0]; d[i + 1] = to[1]; d[i + 2] = to[2]; }
+      }
+      ctx.putImageData(img, x0, y0);
+    }
+  };
+  return P;
+}
+function inPoly(x, y, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, yi] = pts[i], [xj, yj] = pts[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function hexInt(h) { return parseInt(h.slice(1), 16); }
+function hexRgb(h) { const n = hexInt(h); return [n >> 16, (n >> 8) & 255, n & 255]; }
+
+/* ---------- icons (1-bit bitmaps rendered as crisp SVG) ---------- */
+const ICONS = {
+  home: ['....##....', '...####...', '..######..', '.########.', '##########', '.#......#.', '.#.####.#.', '.#.#..#.#.', '.#.#..#.#.', '.###..###.'],
+  book: ['..........', '.###..###.', '#...##...#', '#.#.##.#.#', '#...##...#', '#.#.##.#.#', '#...##...#', '#.#.##.#.#', '.###..###.', '..........'],
+  gear: ['....##....', '.#.####.#.', '..######..', '.###..###.', '####..####', '####..####', '.###..###.', '..######..', '.#.####.#.', '....##....'],
+  reel: ['..######..', '.#......#.', '#..##....#', '#..##.##.#', '#.....##.#', '#.##.....#', '#.##..##.#', '#.....##.#', '.#......#.', '..######..'],
+  key: ['..........', '..........', '.###......', '#...######', '#.#.#.#.#.', '#...#.....', '.###......', '..........', '..........', '..........'],
+  live: ['..........', '.#......#.', '#..#..#..#', '#.#....#.#', '#.#.##.#.#', '#.#.##.#.#', '#.#....#.#', '#..#..#..#', '.#......#.', '..........'],
+  blueprint: ['###.###.##', '#.........', '#.........', '..........', '#...####..', '#...#..#..', '....#..#..', '#...####..', '#.........', '..........'],
+  check: ['##########', '#........#', '#.......##', '#......#.#', '#.#...#..#', '#..#.#...#', '#...#....#', '#........#', '##########', '..........'],
+  hourglass: ['##########', '.#......#.', '..#....#..', '...#..#...', '....##....', '....##....', '...#..#...', '..#.##.#..', '.#.####.#.', '##########'],
+  warn: ['....##....', '....##....', '...#..#...', '...#..#...', '..#.##.#..', '..#.##.#..', '.#..##..#.', '.#......#.', '#...##...#', '##########'],
+  up: ['....##....', '...####...', '..######..', '.########.', '##########', '...####...', '...####...', '...####...', '...####...', '..........'],
+  down: ['..........', '...####...', '...####...', '...####...', '...####...', '##########', '.########.', '..######..', '...####...', '....##....'],
+  prev: ['......##..', '.....##...', '....##....', '...##.....', '..##......', '..##......', '...##.....', '....##....', '.....##...', '......##..'],
+  next: ['..##......', '...##.....', '....##....', '.....##...', '......##..', '......##..', '.....##...', '....##....', '...##.....', '..##......'],
+  stale: ['..######..', '.#......#.', '#...##...#', '#...##...#', '#...###..#', '#.....#..#', '#........#', '#........#', '.#......#.', '..######..']
+};
+function icon(name) {
+  const rows = ICONS[name];
+  let rects = '';
+  rows.forEach((row, y) => { for (let x = 0; x < row.length; x++) if (row[x] === '#') rects += `<rect x="${x}" y="${y}" width="1" height="1"/>`; });
+  return `<span class="px-icon" aria-hidden="true"><svg viewBox="0 0 10 10" fill="currentColor">${rects}</svg></span>`;
+}
+
+/* ---------- Direction A home scene ---------- */
+const BOX_A = { window: [13, 17, 94, 92], board: [113, 19, 100, 72], machine: [219, 25, 52, 132], door: [273, 27, 42, 130], manual: [191, 95, 20, 16] };
+
+function drawWorkshopRoom(P, t) {
+  // Wall, ceiling, wainscot, floor.
+  P.r(0, 0, 320, 118, A.pl0);
+  P.dith(296, 7, 24, 110, A.wal3, 9);
+  P.dith(0, 7, 12, 110, A.wal3, 6);
+  P.r(0, 0, 320, 6, A.wal0); P.hl(0, 6, 320, A.wal1);
+  for (let x = 30; x < 320; x += 64) { P.r(x, 7, 4, 3, A.wal0); }
+  P.r(0, 118, 320, 38, A.wal1); P.r(0, 115, 320, 3, A.wal2); P.hl(0, 115, 320, A.wal3);
+  for (let x = 4; x < 320; x += 36) { P.frame(x, 122, 30, 30, A.wal0); P.hl(x + 1, 123, 28, A.wal2); P.vl(x + 1, 123, 28, A.wal2); }
+  P.r(0, 156, 320, 24, A.wal1); P.hl(0, 156, 320, A.ink1);
+  for (let row = 0, y = 157; y < 180; y += 6, row++) {
+    P.hl(0, y + 5, 320, A.wal0);
+    for (let x = (row * 23) % 40; x < 320; x += 40) P.vl(x, y, 5, A.wal0);
+  }
+  P.dith(0, 157, 320, 5, A.wal0, 6);
+  // Rug.
+  P.r(116, 162, 96, 12, A.sell0); P.frame(116, 162, 96, 12, A.lamp0);
+  for (let x = 122; x < 208; x += 10) { P.p(x, 167, A.sell1); P.p(x + 1, 168, A.sell1); P.p(x - 1, 168, A.sell1); P.p(x, 169, A.sell1); }
+  // Warm lamp light on the wall and floor (palette-locked).
+  P.relight(130, 92, 112, 70, { [A.pl0]: A.pl1, [A.wal3]: A.pl0, [A.wal1]: A.wal2, [A.wal0]: A.wal1, [A.sell0]: A.sell1 });
+  P.relight(130, 88, 54, 34, { [A.pl1]: A.pl2 });
+}
+
+function drawStreetWindow(P, t, board) {
+  P.r(13, 17, 94, 90, A.wal0); P.r(16, 20, 88, 84, A.wal2); P.hl(16, 20, 88, A.wal3);
+  const gx = 20, gy = 24, gw = 80, gh = 76;
+  // Banded dusk sky with dithered seams.
+  const bands = [[A.sky0, 16], [A.sky1, 14], [A.sky2, 12], [A.sky3, 34]];
+  let y = gy;
+  bands.forEach(([c, h], i) => {
+    P.r(gx, y, gw, h, c);
+    if (i > 0) P.dith(gx, y - 3, gw, 3, c, 8);
+    y += h;
+  });
+  [[26, 27], [44, 30], [70, 26], [90, 33], [33, 35], [58, 28]].forEach(([sx, sy]) => P.p(sx, sy, A.pl3));
+  P.r(88, 28, 3, 3, A.lamp3); P.p(91, 29, A.lamp3);
+  // Buildings across the street.
+  P.r(20, 52, 14, 48, A.ink2); P.r(86, 60, 14, 40, A.ink2); P.r(80, 66, 8, 34, A.ink1);
+  P.poly([[33, 50], [60, 40], [87, 50]], A.ink1); P.r(33, 50, 54, 50, A.ink1);
+  for (const [wx, wy] of [[23, 56], [28, 62], [23, 70], [28, 80], [89, 64], [94, 72], [89, 82], [94, 88]]) P.r(wx, wy, 2, 3, (wx + wy) % 3 ? A.lamp2 : A.lamp1);
+  // The public board.
+  const bx = 39, by = 55, bw = 42, bh = 33;
+  P.r(bx - 1, by - 1, bw + 2, bh + 2, A.lamp0); P.r(bx, by, bw, bh, A.ink0);
+  const live = board === 'live', stale = board === 'stale' || board === 'paused';
+  const sellC = stale ? A.ink2 : A.sell1, buyC = stale ? A.ink2 : A.buy1, txt = stale ? A.ink2 : A.pl0;
+  if (board === 'live' || stale) {
+    const asks = [6, 11, 8], bids = [12, 7, 14];
+    asks.forEach((len, i) => { const ry = by + 3 + i * 4; P.r(bx + 3, ry, 9, 2, txt); P.r(bx + 15, ry, len, 2, sellC); });
+    for (let x = bx + 3; x < bx + bw - 3; x += 3) P.p(x, by + 16, A.ink2);
+    bids.forEach((len, i) => { const ry = by + 19 + i * 4; P.r(bx + 3, ry, 9, 2, txt); P.r(bx + 15, ry, len, 2, buyC); });
+  }
+  if (board === 'quiet') { P.r(bx + 13, by + 15, 16, 2, A.pl0); P.r(bx + 6, by + 22, 30, 1, A.ink2); P.r(bx + 6, by + 10, 30, 1, A.ink2); }
+  if (board === 'loading') { const k = Math.floor(t / 2) % 4; for (let i = 0; i < 4; i++) P.r(bx + 12 + i * 5, by + 15, 3, 3, i === k ? A.lamp2 : A.ink2); }
+  if (board === 'error') { P.r(bx + 18, by + 7, 6, 14, A.alert); P.r(bx + 18, by + 24, 6, 4, A.alert); for (let x = bx; x < bx + bw; x += 4) { P.r(x, by + bh - 3, 2, 3, A.lamp1); } }
+  if (board === 'paused') { P.r(bx + 15, by + 12, 4, 10, A.lamp2); P.r(bx + 23, by + 12, 4, 10, A.lamp2); }
+  if (live && (reduced || Math.floor(t / 6) % 2 === 0)) P.r(bx + bw - 5, by + 2, 3, 3, A.sage2);
+  if (live && reduced) P.r(bx + bw - 5, by + 2, 3, 3, A.sage2);
+  if (stale && board === 'stale') { P.r(bx + bw - 5, by + 2, 3, 3, A.lamp1); }
+  // Street lamp.
+  P.vl(96, 70, 30, A.ink1); P.r(94, 68, 5, 3, A.lamp2); P.dith(91, 66, 11, 8, A.lamp1, 3);
+  P.r(20, 38, 80, 2, A.wal2); P.hl(20, 40, 80, A.wal0);
+}
+
+function drawHomeA(P, t, hi, board = 'live', lit = true) {
+  drawWorkshopRoom(P, t);
+  drawStreetWindow(P, t, board);
+  // Sill, cat, plant.
+  P.r(11, 104, 98, 4, A.wal3); P.hl(11, 104, 98, A.pl1); P.hl(11, 108, 98, A.wal0);
+  const breathe = !reduced && Math.floor(t / 5) % 2;
+  P.r(25, 99 + (breathe ? 0 : 1), 13, 5 - (breathe ? 0 : 1), A.ink1); P.r(21, 98, 6, 6, A.ink1);
+  P.p(21, 97, A.ink1); P.p(25, 97, A.ink1); P.p(23, 100, A.pl2); P.r(37, 102, 4, 2, A.ink1);
+  P.r(84, 98, 10, 6, A.sell0); P.hl(84, 98, 10, A.sell1);
+  P.dith(81, 88, 16, 10, A.sage1, 10); P.dith(83, 86, 12, 8, A.sage2, 5); P.vl(88, 92, 6, A.sage0);
+  // Covered bench (scenery only).
+  P.r(18, 128, 82, 22, A.sky1); P.r(20, 126, 78, 3, A.sky2);
+  for (let x = 26; x < 98; x += 12) { P.vl(x, 129, 21, A.sky0); P.vl(x + 1, 130, 18, A.sky2); }
+  P.r(22, 150, 4, 6, A.ink1); P.r(92, 150, 4, 6, A.ink1);
+  // Cork board with lesson cards and a thread.
+  P.r(113, 19, 100, 72, A.wal1); P.r(116, 22, 94, 66, A.wal3);
+  P.dith(116, 22, 94, 66, A.lamp0, 3); P.dith(117, 23, 93, 65, A.wal2, 2); P.hl(113, 19, 100, A.wal2);
+  const card = (x, y, w, h, c, pin, lines = true) => {
+    P.r(x + 1, y + 1, w, h, A.wal1); P.r(x, y, w, h, c);
+    if (lines) { P.r(x + 3, y + 4, w - 10, 2, A.ink1); for (let ly = y + 9; ly < y + h - 3; ly += 4) P.hl(x + 3, ly, w - 8 - ((ly * 7) % 9), A.ink2); }
+    P.r(x + Math.floor(w / 2) - 1, y - 1, 3, 3, pin); P.p(x + Math.floor(w / 2) - 1, y - 1, A.lamp3);
+  };
+  card(124, 30, 34, 26, A.pl3, A.sell1);
+  P.r(149, 49, 2, 3, A.buy1); P.r(153, 48, 2, 3, A.sell1);
+  card(164, 28, 28, 18, A.pl2, A.buy1);
+  P.r(164, 52, 38, 28, A.bp0); P.r(165, 53, 38, 28, A.wal1); P.r(164, 52, 38, 28, A.bp0);
+  for (let gx = 166; gx < 202; gx += 4) for (let gy = 54; gy < 80; gy += 2) P.p(gx, gy, '#335a86');
+  P.frame(170, 58, 10, 8, A.bp1); P.frame(186, 66, 10, 8, A.bp1); P.line(180, 62, 186, 70, A.bp1); P.r(182, 51, 3, 3, A.sage2);
+  card(124, 62, 28, 20, A.pl2, A.lamp1);
+  P.r(144, 74, 5, 5, A.sage1); P.p(145, 76, A.pl3); P.p(146, 77, A.pl3); P.p(147, 75, A.pl3);
+  P.line(141, 30, 183, 52, A.sell1); P.line(183, 52, 138, 62, A.sell1);
+  // Desk, lamp, ledger, manual, mug, chair.
+  P.r(110, 110, 108, 4, A.wal3); P.hl(110, 110, 108, A.pl1); P.r(112, 114, 104, 36, A.wal2); P.hl(112, 114, 104, A.wal1);
+  P.frame(120, 119, 40, 12, A.wal1); P.frame(168, 119, 40, 12, A.wal1); P.r(139, 124, 2, 2, A.lamp1); P.r(187, 124, 2, 2, A.lamp1);
+  P.r(112, 150, 4, 6, A.wal1); P.r(212, 150, 4, 6, A.wal1); P.dith(116, 136, 96, 20, A.wal1, 4);
+  P.r(117, 107, 12, 3, A.ink2); P.line(122, 107, 128, 96, A.ink1); P.line(123, 107, 129, 96, A.ink1);
+  P.poly([[124, 96], [138, 96], [135, 88], [127, 88]], A.lamp0); P.hl(127, 88, 8, A.lamp1); P.r(128, 96, 6, 1, A.lamp3);
+  P.dith(118, 97, 26, 13, A.lamp2, lit ? 4 : 0);
+  P.r(146, 104, 18, 6, A.pl3); P.r(165, 104, 18, 6, A.pl2); P.vl(164, 104, 6, A.ink2);
+  for (let lx = 148; lx < 182; lx += 2) if (lx !== 164) P.p(lx, 106, A.ink2);
+  P.r(171, 109, 2, 6, A.sell1);
+  P.r(192, 97, 5, 13, A.sage1); P.hl(192, 100, 5, A.lamp2); P.r(198, 99, 5, 11, A.buy0); P.r(204, 98, 5, 12, A.sell0); P.hl(204, 101, 5, A.lamp1);
+  P.r(136, 104, 6, 6, A.pl3); P.hl(136, 106, 6, A.buy1); P.vl(142, 105, 3, A.pl2);
+  if (!reduced) { const s = Math.floor(t / 3) % 3; P.p(138 + (s === 1 ? 1 : 0), 101 - s, A.pl2); P.p(139, 98 - s % 2, A.pl3); }
+  P.r(150, 112, 3, 44, A.wal0); P.r(175, 112, 3, 44, A.wal0); P.r(150, 112, 28, 4, A.wal0); P.hl(150, 112, 28, A.wal1);
+  for (let sx = 156; sx < 174; sx += 6) P.r(sx, 116, 2, 18, A.wal0);
+  P.r(150, 134, 28, 3, A.wal0);
+  // Pneumatic tube from desk to cabinet with a travelling capsule.
+  P.r(213, 40, 4, 70, A.pl2); P.vl(213, 40, 70, A.lamp0); P.vl(216, 40, 70, A.lamp0); P.r(213, 38, 9, 4, A.lamp0); P.hl(213, 39, 9, A.lamp1);
+  for (let cy = 48; cy < 108; cy += 16) P.r(212, cy, 6, 2, A.wal0);
+  const capY = reduced ? 80 : 104 - (t * 2) % 66;
+  P.r(214, capY, 2, 5, A.buy1); P.p(214, capY, A.buy2);
+  // Machine cabinet.
+  P.r(219, 25, 52, 6, A.wal0); P.hl(219, 25, 52, A.wal2); P.r(221, 31, 48, 125, A.wal1); P.vl(221, 31, 125, A.wal2); P.r(267, 31, 2, 125, A.wal0);
+  P.r(226, 36, 38, 26, A.lamp0); P.r(228, 38, 34, 22, A.bp0);
+  const stages = [[231, 41], [242, 41], [253, 41], [231, 51], [242, 51], [253, 51]];
+  stages.forEach(([sx, sy], i) => { P.frame(sx, sy, 7, 6, A.bp1); if (i === Math.floor(t / 4) % 6 && !reduced) P.r(sx + 2, sy + 2, 3, 2, A.lamp2); });
+  if (reduced) P.r(244, 53, 3, 2, A.lamp2);
+  P.hl(238, 44, 4, A.bp1); P.hl(249, 44, 4, A.bp1); P.vl(256, 47, 4, A.bp1); P.hl(238, 54, 4, A.bp1); P.hl(249, 54, 4, A.bp1);
+  P.r(226, 66, 38, 30, A.lamp0); P.r(228, 68, 34, 26, A.ink1); P.r(236, 70, 18, 24, A.pl3); P.r(234, 68, 22, 3, A.ink2);
+  const off = reduced ? 0 : Math.floor(t / 2) % 4;
+  for (let ly = 72 + off; ly < 93; ly += 4) P.hl(238, ly, 10 + (ly % 3) * 2, A.ink2);
+  [[232, 98, A.sage2], [244, 98, A.lamp2], [256, 98, A.sage2]].forEach(([lx, ly, c]) => P.r(lx, ly, 3, 2, c));
+  P.frame(225, 102, 20, 50, A.wal0); P.frame(246, 102, 20, 50, A.wal0); P.hl(226, 103, 18, A.wal2); P.hl(247, 103, 18, A.wal2);
+  P.r(242, 124, 2, 4, A.lamp1); P.r(248, 124, 2, 4, A.lamp1); P.r(222, 155, 6, 1, A.ink1); P.r(262, 155, 6, 1, A.ink1);
+  // Door to My run with its key tag.
+  P.r(273, 34, 42, 122, A.wal0); P.r(276, 37, 36, 119, A.wal2); P.vl(276, 37, 119, A.wal3);
+  P.frame(280, 42, 28, 46, A.wal1); P.frame(280, 92, 28, 58, A.wal1);
+  P.r(285, 47, 18, 14, lit ? A.ink1 : A.ink1); P.vl(294, 47, 14, A.wal1);
+  P.r(278, 104, 2, 3, A.lamp1); P.line(279, 107, 281, 112, A.ink2); P.r(279, 112, 8, 6, A.pl3); P.p(280, 113, A.buy1); P.hl(281, 115, 5, A.ink2);
+  P.hl(276, 155, 36, A.ink1);
+  P.r(282, 27, 24, 6, A.lamp0); P.hl(282, 27, 24, A.lamp1); P.hl(286, 30, 16, A.ink2);
+  // Hover and focus outline (one palette color, 1 px outside the object).
+  if (hi && BOX_A[hi]) { const [x, y, w, h] = BOX_A[hi]; P.frame(x - 2, y - 2, w + 4, h + 4, A.lamp3); P.frame(x - 3, y - 3, w + 6, h + 6, A.ink0); }
+}
+
+/* ---------- Direction B home scene (isometric) ---------- */
+const OX = 160, OY = 66;
+const iso = (x, y, z) => [OX + (x - y), OY + (x + y) / 2 - z];
+function isoBox(P, x, y, z, w, d, h, top, left, right) {
+  const q = (pts) => pts.map(([a, b, c]) => iso(a, b, c));
+  P.poly(q([[x, y + d, z], [x + w, y + d, z], [x + w, y + d, z + h], [x, y + d, z + h]]), left);
+  P.poly(q([[x + w, y, z], [x + w, y + d, z], [x + w, y + d, z + h], [x + w, y, z + h]]), right);
+  P.poly(q([[x, y, z + h], [x + w, y, z + h], [x + w, y + d, z + h], [x, y + d, z + h]]), top);
+}
+const wallL = (P, y0, y1, z0, z1, c) => P.poly([iso(0, y0, z0), iso(0, y1, z0), iso(0, y1, z1), iso(0, y0, z1)], c);
+const wallR = (P, x0, x1, z0, z1, c) => P.poly([iso(x0, 0, z0), iso(x1, 0, z0), iso(x1, 0, z1), iso(x0, 0, z1)], c);
+const BOX_B = {};
+
+function drawHomeB(P, t, hi) {
+  P.r(0, 0, 320, 180, B.ink0);
+  P.dith(0, 0, 320, 40, B.ink1, 6);
+  [[14, 12], [40, 30], [70, 8], [250, 14], [290, 40], [300, 10], [20, 60], [280, 70], [230, 30]].forEach(([x, y]) => P.p(x, y, B.paper));
+  const S = 104, Hh = 58;
+  // Slab and floor.
+  P.poly([iso(0, S, 0), iso(S, S, 0), iso(S, S, -6), iso(0, S, -6)], B.ink2);
+  P.poly([iso(S, 0, 0), iso(S, S, 0), iso(S, S, -6), iso(S, 0, -6)], B.nav0);
+  P.poly([iso(0, 0, 0), iso(S, 0, 0), iso(S, S, 0), iso(0, S, 0)], B.floor);
+  for (let k = 13; k < S; k += 13) { const [a, b] = iso(k, 0, 0), [c, d] = iso(k, S, 0); P.line(a, b, c, d, B.floor2); const [e, f] = iso(0, k, 0), [g, h] = iso(S, k, 0); P.line(e, f, g, h, B.floor2); }
+  // Walls.
+  wallL(P, 0, S, 0, Hh, B.wallL); wallL(P, 0, S, 0, 14, B.wallLo);
+  wallR(P, 0, S, 0, Hh, B.wallR); wallR(P, 0, S, 0, 14, B.wallRo);
+  P.poly([iso(0, 0, Hh), iso(0, S, Hh), iso(-3, S, Hh + 1), iso(-3, -3, Hh + 1)], B.nav1);
+  P.poly([iso(0, 0, Hh), iso(S, 0, Hh), iso(S, -3, Hh + 1), iso(-3, -3, Hh + 1)], B.nav2);
+  // Window on the left wall: night street with the public board and rain.
+  wallL(P, 16, 64, 18, 50, B.nav0); wallL(P, 18, 62, 20, 48, B.ink1);
+  wallL(P, 20, 30, 20, 38, B.ink2); wallL(P, 52, 62, 20, 34, B.ink2); wallL(P, 30, 52, 20, 44, B.ink0);
+  wallL(P, 33, 49, 26, 41, B.amber0); wallL(P, 34, 48, 27, 40, B.ink0);
+  [[36, 38, 6, B.sell], [36, 36, 9, B.sell], [36, 31, 8, B.buy], [36, 29, 11, B.buy]].forEach(([y0, z, len, c]) => wallL(P, y0, y0 + len, z, z + 1, c));
+  if (reduced || Math.floor(t / 6) % 2 === 0) wallL(P, 45, 47, 38, 40, B.phos1);
+  const glass = [iso(0, 18, 20), iso(0, 62, 20), iso(0, 62, 48), iso(0, 18, 48)];
+  if (!reduced) for (let i = 0; i < 26; i++) {
+    const rx = 100 + ((i * 37 + t * 3) % 60), ry = 20 + ((i * 53 + t * 5) % 60);
+    for (let k = 0; k < 3; k++) if (inPoly(rx - k + .5, ry + k * 2 + .5, glass)) P.p(rx - k, ry + k * 2, B.nav2);
+  }
+  wallL(P, 39, 41, 20, 48, B.nav0);
+  // Schematic screen on the right wall: lesson cards.
+  wallR(P, 10, 54, 20, 48, B.ink2); wallR(P, 12, 52, 22, 46, B.ink0);
+  wallR(P, 15, 27, 34, 43, B.phos0); wallR(P, 16, 26, 35, 42, B.ink1); wallR(P, 17, 25, 39, 40, B.phos1);
+  wallR(P, 31, 41, 36, 43, B.phos0); wallR(P, 32, 40, 37, 42, B.ink1);
+  wallR(P, 15, 25, 24, 31, B.phos0); wallR(P, 31, 49, 24, 32, '#183457');
+  // Door on the right wall.
+  wallR(P, 66, 90, 0, 42, B.wood0); wallR(P, 68, 88, 0, 40, B.wood); wallR(P, 72, 84, 28, 36, B.amber1); wallR(P, 78, 79, 28, 36, B.wood);
+  wallR(P, 70, 72, 18, 21, B.amber2);
+  wallR(P, 66, 90, 0, 1, B.amber2);
+  // Racks against the left wall.
+  isoBox(P, 2, 72, 0, 14, 28, 46, B.nav1, B.ink2, B.ink1);
+  for (let z = 6; z < 44; z += 6) for (let y = 75; y < 98; y += 5) {
+    const on = reduced ? (y + z) % 3 === 0 : ((y * 7 + z * 3 + Math.floor(t / 3)) % 5) === 0;
+    const [sx, sy] = iso(16, y, z); P.p(sx, sy, on ? B.phos1 : B.phos0);
+  }
+  // Lamp pool on the floor.
+  const [lx, ly] = iso(90, 78, 0);
+  P.relight(lx, ly, 36, 18, { [B.floor]: B.floorLit, [B.floor2]: B.floor });
+  // Desk with monitors and a cat.
+  isoBox(P, 34, 34, 0, 44, 22, 13, B.wood2, B.wood, B.wood0);
+  isoBox(P, 40, 38, 13, 16, 3, 13, B.ink2, B.phos0, B.ink1);
+  P.poly([iso(41, 41, 15), iso(55, 41, 15), iso(55, 41, 25), iso(41, 41, 25)], B.phos1);
+  for (let z = 17; z < 25; z += 3) { const [a, b] = iso(43, 41, z); const [c, d] = iso(52, 41, z); P.line(a, b, c, d, B.phos0); }
+  isoBox(P, 60, 38, 13, 12, 3, 11, B.ink2, B.phos0, B.ink1);
+  P.poly([iso(61, 41, 15), iso(71, 41, 15), iso(71, 41, 23), iso(61, 41, 23)], '#183457');
+  isoBox(P, 46, 47, 13, 12, 5, 1, B.paper, B.nav2, B.nav1);
+  isoBox(P, 66, 46, 13, 7, 5, 4, B.ink1, B.ink2, B.ink0);
+  isoBox(P, 66, 46, 17, 4, 4, 2, B.ink1, B.ink2, B.ink0);
+  // Chair.
+  isoBox(P, 50, 62, 0, 10, 10, 7, B.nav1, B.nav0, B.ink2);
+  isoBox(P, 50, 70, 7, 10, 2, 11, B.nav1, B.nav0, B.ink2);
+  // Floor lamp.
+  { const [px0, py0] = iso(90, 78, 0); P.vl(px0, py0 - 30, 30, B.ink2); P.r(px0 - 2, py0 - 1, 5, 2, B.ink2); }
+  isoBox(P, 86, 74, 30, 8, 8, 6, B.amber2, B.amber1, B.amber0);
+  // Plant.
+  isoBox(P, 94, 4, 0, 8, 8, 6, B.wood2, B.wood, B.wood0);
+  { const [px1, py1] = iso(98, 8, 6); P.dith(px1 - 7, py1 - 14, 14, 14, B.sage, 10); P.dith(px1 - 5, py1 - 16, 10, 10, B.sage2, 5); }
+  // Highlight.
+  BOX_B.window = bbox([iso(0, 16, 18), iso(0, 64, 18), iso(0, 64, 50), iso(0, 16, 50)]);
+  BOX_B.board = bbox([iso(10, 0, 20), iso(54, 0, 20), iso(54, 0, 48), iso(10, 0, 48)]);
+  BOX_B.machine = bbox([iso(2, 72, 0), iso(16, 100, 0), iso(2, 72, 46), iso(16, 72, 46), iso(2, 100, 46)]);
+  BOX_B.door = bbox([iso(66, 0, 0), iso(90, 0, 0), iso(66, 0, 42), iso(90, 0, 42)]);
+  BOX_B.manual = bbox([iso(46, 47, 13), iso(58, 52, 14)]);
+  if (hi && BOX_B[hi]) { const [x, y, w, h] = BOX_B[hi]; P.frame(x - 2, y - 2, w + 4, h + 4, B.amber2); }
+}
+function bbox(pts) {
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+  const x = Math.floor(Math.min(...xs)), y = Math.floor(Math.min(...ys));
+  return [x, y, Math.ceil(Math.max(...xs)) - x, Math.ceil(Math.max(...ys)) - y];
+}
+
+/* ---------- HUD and hotspots ---------- */
+function buildHud(hud, dir, boxes, canvas, redraw) {
+  const labels = {
+    window: ['Public market', 'PUBLIC DEMO · LIVE'],
+    board: ['Lessons', '1 OF 9 STARTED'],
+    machine: ['How it works', 'SCHEMATIC TOUR'],
+    door: ['My lab', 'INVITE REQUIRED'],
+    manual: ['Field manual', '']
+  };
+  hud.innerHTML = `
+    <div class="wordmark">${icon('reel').replace('px-icon', 'px-icon')}EXCHANGE LAB</div>
+    <div class="proto">PROTOTYPE · SAMPLE DATA</div>
+    <div class="hud-right">
+      <span class="stamp stamp-public">${icon('live')}Public demo · live</span>
+    </div>
+    <div class="start-card" role="group" aria-label="Recommended next step">
+      <span class="k">START HERE · RECORDED LESSON · ABOUT 4 MIN</span>
+      <h3>Who trades first?</h3>
+      <p>Two sellers offer the same price. A buyer arrives. Predict who sells first, then see why.</p>
+      <button class="btn btn-primary go" type="button" data-go="board">Start lesson ${icon('next')}</button>
+      <div class="secondary"><button class="btn btn-quiet" type="button" data-go="window">Watch the public market</button><button class="btn btn-quiet" type="button" data-go="manual">Open the field manual</button></div>
+    </div>`;
+  const order = ['window', 'board', 'manual', 'machine', 'door'];
+  const place = dir === 'a'
+    ? { window: [236, 448], board: [640, 332], manual: [812, 352], machine: [980, 80], door: [1178, 80] }
+    : { window: [500, 128], board: [770, 248], manual: [648, 466], machine: [300, 200], door: [955, 200] };
+  order.forEach((k) => {
+    const [x, y, w, h] = boxes[k];
+    const b = document.createElement('button');
+    b.className = 'hotspot'; b.type = 'button';
+    b.style.cssText = `left:${x * 4}px;top:${y * 4}px;width:${w * 4}px;height:${h * 4}px`;
+    b.setAttribute('aria-label', `${labels[k][0]}${labels[k][1] ? ', ' + labels[k][1].toLowerCase() : ''}`);
+    b.dataset.go = k;
+    const tag = document.createElement('span');
+    tag.className = 'tag-label';
+    tag.innerHTML = `${labels[k][0]}${labels[k][1] ? `<small>${labels[k][1]}</small>` : ''}`;
+    let [tx, ty] = place ? place[k] : [(x + w / 2) * 4, (y + h) * 4 + 8];
+    if (!place && k === 'machine') ty = y * 4 - 40;
+    if (!place && k === 'door') ty = y * 4 - 40;
+    if (!place && k === 'manual') { ty = (y + h) * 4 + 30; }
+    tag.style.left = tx + 'px'; tag.style.top = ty + 'px';
+    hud.append(b, tag);
+    const on = () => redraw(k), off = () => redraw(null);
+    b.addEventListener('mouseenter', on); b.addEventListener('focus', on);
+    b.addEventListener('mouseleave', () => { if (document.activeElement !== b) off(); });
+    b.addEventListener('blur', off);
+  });
+  hud.addEventListener('click', (e) => {
+    const go = e.target.closest('[data-go]');
+    if (!go) return;
+    const target = go.dataset.go;
+    const inner = canvas.parentElement;
+    const [x, y, w, h] = boxes[target];
+    canvas.style.transformOrigin = `${(x + w / 2) * 4}px ${(y + h / 2) * 4}px`;
+    inner.classList.remove('pushing'); void inner.offsetWidth; inner.classList.add('pushing');
+    setTimeout(() => {
+      inner.classList.remove('pushing');
+      if (target === 'board' || target === 'manual') {
+        const ws = document.getElementById(dir === 'a' ? 'ws-a' : 'ws-b');
+        ws.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' });
+        if (target === 'manual') ws.querySelector('[data-act="manual"]').click();
+        ws.querySelector('.lens-tab').focus({ preventScroll: true });
+      }
+    }, reduced ? 0 : 380);
+  });
+}
+
+/* ---------- Lesson workspace (identical structure for both directions) ---------- */
+function buildWorkspace(host) {
+  host.innerHTML = `
+  <div class="ws">
+    <header class="ws-top">
+      <button class="ws-tool" type="button">${icon('home')}Home</button>
+      <nav class="crumb" aria-label="Breadcrumb">Lessons<span>›</span>Who trades first?<span>›</span><b>Step 4 of 7 · Match</b></nav>
+      <span class="stamp stamp-rec">${icon('reel')}Recorded lesson</span>
+      <button class="ws-tool" type="button" data-act="manual" aria-pressed="false">${icon('book')}Field manual</button>
+      <button class="ws-tool" type="button" aria-label="Settings">${icon('gear')}</button>
+    </header>
+    <div class="ws-proto">${icon('warn')}PROTOTYPE · SAMPLE DATA · NOT ENGINE EVIDENCE</div>
+    <p class="ws-context">Recorded from a generated-only run. Every order here is scripted, so individual resting orders can be shown.</p>
+    <div class="ws-body">
+      <section class="ws-board" aria-label="Order book">
+        <div class="ws-board-head"><h3>SPY · order book</h3>
+          <div class="lens-tabs" role="tablist" aria-label="Lens">
+            <button class="lens-tab" role="tab" aria-selected="true" data-lens="market" type="button">Market</button>
+            <button class="lens-tab" role="tab" aria-selected="false" data-lens="machine" type="button" tabindex="-1">Machine</button>
+            <button class="lens-tab" role="tab" aria-selected="false" data-lens="structure" type="button" tabindex="-1">Structure</button>
+          </div>
+        </div>
+        <div class="lens" data-panel="market" role="tabpanel">
+          <div class="ladder">
+            <span class="colh">INCOMING</span><span class="colh">PRICE</span><span class="colh">RESTING ORDERS · OLDEST FIRST</span><span class="colh">TRADES · MATCHING ORDER</span>
+            <span></span><span class="price ask">100.04<small>▼ ASK</small></span>
+            <div class="orders"><div class="ocard small sell"><b>2</b><span>sell</span></div></div>
+            <div class="incoming"><div class="incard"><b>▲ BUY 4</b>@ 100.02 · GTC<br>scripted buyer</div><span class="rail-arrow" aria-hidden="true">→</span></div>
+            <span class="price ask">100.02<small>▼ ASK</small></span>
+            <div class="orders" style="position:relative"><span class="firstline">FIRST IN LINE</span>
+              <div class="ocard sell done focus"><b>A · sell 3</b><span>seq 7</span><span class="st">✓ FILLED 3</span></div>
+              <div class="ocard sell part"><b>B · sell 5</b><span>seq 9 · 4 left</span><span class="st">◐ FILLED 1</span></div>
+            </div>
+            <div class="spreadrow">SPREAD 0.02 AFTER MATCH</div>
+            <span></span><span class="price bid">100.00<small>▲ BID</small></span>
+            <div class="orders"><div class="ocard small buy"><b>6</b><span>buy</span></div></div>
+            <span></span><span class="price bid">99.98<small>▲ BID</small></span>
+            <div class="orders"><div class="ocard small buy"><b>4</b><span>buy</span></div></div>
+            <div class="trades">
+              <div class="slip"><b>#1</b> A sells 3 @ 100.02</div>
+              <div class="slip"><b>#2</b> B sells 1 @ 100.02</div>
+            </div>
+          </div>
+          <span class="board-stamp stamp stamp-rec">${icon('reel')}Recorded · run 41 · sample</span>
+        </div>
+        <div class="lens" data-panel="machine" role="tabpanel" hidden>
+          <div class="pipe">
+            ${[['Generator', 'scripted buyer; not a browser order'], ['Admission', 'new command accepted'], ['Sequence', 'seq 12'], ['Journal', 'recorded before matching'], ['Matching', '2 trades, A then B'], ['Results', 'public trades and private results']]
+              .map(([n, ev], i) => `<div class="stagebox">${i === 4 ? '<span class="token">▲ BUY 4 · seq 12</span>' : ''}<div class="house${i === 4 ? ' now' : ''}">${n}</div><span class="ev">${ev}</span><span class="tube"></span></div>`).join('')}
+          </div>
+          <div class="machine-notes">
+            <span>Generated commands enter at Generator. Your own browser orders would enter at Gateway.</span>
+            <span>These are logical stages inside one process, not separate servers.</span>
+          </div>
+          <span class="board-stamp stamp stamp-ev">${icon('check')}Evidence · recorded · sample</span>
+        </div>
+        <div class="lens" data-panel="structure" role="tabpanel" hidden>
+          <div class="struct">
+            <div class="shelf">
+              <div class="level"><span class="lp">100.04</span><div class="chain"><span class="node">order · 2</span></div></div>
+              <div class="level"><span class="lp">100.02</span><div class="chain"><span class="node">A · 3 · seq 7</span><span class="link">→</span><span class="node">B · 5 · seq 9</span><span class="link">→</span><span class="node">end</span></div></div>
+              <div class="level"><span class="lp">bids</span><div class="chain"><span class="node">100.00 · 6</span><span class="link">·</span><span class="node">99.98 · 4</span></div></div>
+            </div>
+            <div class="drawer"><h4>Active-order lookup</h4>OrderId → level and place in line<br>used for cancellation without scanning the book</div>
+          </div>
+          <span class="board-stamp stamp stamp-sch">${icon('blueprint')}Schematic · not a memory capture</span>
+        </div>
+      </section>
+      <aside class="ws-side" aria-label="Lesson">
+        <span class="k">OBJECTIVE</span>
+        <h3>Who sells to the buyer first?</h3>
+        <div class="pred">${icon('check')}<span>You predicted <b>order A</b>. That matches the recorded outcome.</span></div>
+        <p>Order A traded first. It reached the exchange earlier, so it has the lower sequence number, 7 before 9. Both trades used the resting price, 100.02.</p>
+        <div class="actions">
+          <button class="btn btn-primary" type="button" data-act="manual">${icon('book')}Why? Open the manual</button>
+          <button class="btn btn-quiet" type="button">Compare with a real venue</button>
+        </div>
+        <p class="fine">Animation explains a recorded result. It does not decide it.</p>
+      </aside>
+      <aside class="ws-manual" aria-label="Field manual" hidden>
+        <span class="stamp stamp-ev" style="justify-self:start">${icon('book')}Field manual · matching</span>
+        <h3 style="margin:0;font:600 20px/1.25 var(--body)">Price-time priority</h3>
+        <blockquote>Within one price level, the lower authoritative command sequence has priority.<div class="src">Exchange Rules › Matching priority and trade formation</div></blockquote>
+        <h4>Why this rule</h4>
+        <p>Explicit priority and pricing make the same command sequence replay to the same trades. Wall-clock time and thread scheduling never decide who is first.</p>
+        <h4>What we gave up</h4>
+        <p>One owner changes each book, so a busy instrument is processed in series.</p>
+        <p class="src">Decision record D-007</p>
+        <button class="btn btn-quiet" type="button" data-act="manual">Close manual (Esc)</button>
+      </aside>
+    </div>
+    <footer class="ws-rail">
+      <button class="ws-tool" type="button">${icon('prev')}Previous</button>
+      <div class="steps" aria-label="Lesson steps">
+        ${['Brief', 'Predict', 'Send', 'Match', 'Explain', 'Inside', 'Debrief'].map((s, i) => `<span class="step${i < 3 ? ' done' : ''}${i === 3 ? ' now' : ''}"${i === 3 ? ' aria-current="step"' : ''}><i></i>${s}</span>`).join('')}
+      </div>
+      <button class="ws-tool" type="button">Next${icon('next')}</button>
+      <div class="speed">${icon('hourglass')}<span>Explanation 1×<small>animation only</small></span></div>
+    </footer>
+  </div>`;
+  const tabs = [...host.querySelectorAll('.lens-tab')];
+  const select = (tab) => {
+    tabs.forEach(t => { const on = t === tab; t.setAttribute('aria-selected', on); t.tabIndex = on ? 0 : -1; });
+    host.querySelectorAll('.lens').forEach(p => { p.hidden = p.dataset.panel !== tab.dataset.lens; });
+  };
+  tabs.forEach((t, i) => {
+    t.addEventListener('click', () => select(t));
+    t.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      const n = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+      select(n); n.focus();
+    });
+  });
+  const side = host.querySelector('.ws-side'), manual = host.querySelector('.ws-manual');
+  const toggle = host.querySelector('.ws-top [data-act="manual"]');
+  let opener = null;
+  host.querySelectorAll('[data-act="manual"]').forEach(b => b.addEventListener('click', () => {
+    const open = manual.hidden;
+    if (open) opener = b;
+    manual.hidden = !open; side.hidden = open; toggle.setAttribute('aria-pressed', open);
+    (open ? manual.querySelector('button') : (opener && !opener.closest('.ws-manual') ? opener : toggle)).focus({ preventScroll: true });
+  }));
+  host.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !manual.hidden) manual.querySelector('button').click(); });
+}
+
+/* ---------- textures for workspaces ---------- */
+function texture(w, h, draw) { const c = document.createElement('canvas'); c.width = w; c.height = h; draw(pix(c)); return c.toDataURL(); }
+const cork = texture(32, 32, (P) => { P.r(0, 0, 32, 32, A.wal3); P.dith(0, 0, 32, 32, A.lamp0, 3); P.dith(1, 2, 31, 30, A.wal2, 2); });
+const grid = texture(16, 16, (P) => { P.r(0, 0, 16, 16, B.ink1); P.hl(0, 0, 16, B.ink2); P.vl(0, 0, 16, B.ink2); P.p(0, 0, B.nav1); });
+document.documentElement.style.setProperty('--cork-a', `url(${cork})`);
+document.documentElement.style.setProperty('--grid-b', `url(${grid})`);
+
+/* ---------- stamps, states, button states ---------- */
+function buildStamps() {
+  const defs = [
+    ['stamp-public', 'live', 'Public demo · live', 'Current public view of the demo run. Identical for everyone.'],
+    ['stamp-run', 'key', 'My run · live', 'Your isolated run. Only you see it.'],
+    ['stamp-rec', 'reel', 'Recorded lesson', 'Playback of retained evidence. Names its run and build. Never live.'],
+    ['stamp-sch', 'blueprint', 'Schematic', 'A drawing that explains a mechanism. Not runtime state.'],
+    ['stamp-ev', 'check', 'Evidence', 'A value read from authoritative output, such as a sequence number.'],
+    ['stamp-proto', 'warn', 'Prototype · sample data', 'Shown on every prototype screen. Cannot be dismissed.']
+  ];
+  document.getElementById('stamp-row').innerHTML = defs.map(([cls, ic, label, desc]) =>
+    `<div class="stamp-def"><span class="stamp ${cls}" style="justify-self:start">${icon(ic)}${label}</span><span>${desc}</span></div>`).join('') +
+    `<div class="stamp-def"><span class="stamp stamp-stale" style="justify-self:start">${icon('stale')}Reconnecting · not live</span><span>Freshness modifier for either live stamp. Values stay visibly stale.</span></div>`;
+
+  const states = [
+    ['live', 'Live', 'stamp-public', 'live', 'Public demo · live', 'Aggregate levels and recent trades. The board light blinks only while the stream is live.'],
+    ['quiet', 'Empty', 'stamp-public', 'live', 'Public demo · live', 'Quiet market. No resting orders right now. Lessons still work.'],
+    ['loading', 'Loading', 'stamp-stale', 'stale', 'Waiting for snapshot', 'Waiting for a complete snapshot. No values are shown until one arrives.'],
+    ['stale', 'Disconnected', 'stamp-stale', 'stale', 'Reconnecting · not live', 'Connection lost. These values are from before the loss and will be replaced, not updated.'],
+    ['error', 'Error', 'stamp-stale', 'warn', 'Public view unavailable', 'The public stream sent something this page cannot read. Lessons and the manual still work.'],
+    ['paused', 'Run paused', 'stamp-public', 'live', 'Public demo · paused', 'The demo run is paused by its operator. The book is current; no new orders are accepted.']
+  ];
+  const grid = document.getElementById('state-grid');
+  grid.innerHTML = states.map(([k, title, cls, ic, label, text]) => `
+    <div class="state"><canvas width="80" height="44" data-board="${k}" aria-hidden="true"></canvas>
+      <div class="sh"><b>${title.toUpperCase()}</b><span class="stamp ${cls}">${icon(ic)}${label}</span></div>
+      <p>${text}</p></div>`).join('');
+
+  const bs = document.getElementById('btn-states');
+  bs.innerHTML = [['Rest', ''], ['Hover', 'fake-hover'], ['Focus', 'fake-focus'], ['Pressed', 'fake-press'], ['Selected', 'fake-sel'], ['Disabled', 'fake-dis']]
+    .map(([n, c]) => `<figure><button class="btn btn-primary ${c}" type="button"${c === 'fake-dis' ? ' disabled aria-disabled="true"' : ''} tabindex="-1">Start lesson</button><figcaption>${n.toUpperCase()}</figcaption></figure>`).join('') +
+    `<figure><span class="stamp stamp-ev" style="max-width:260px;white-space:normal;line-height:1.35">${icon('warn')}Disabled controls always say why: "Invite required"</span><figcaption>REASON TEXT</figcaption></figure>`;
+}
+function drawStates(t) {
+  document.querySelectorAll('#state-grid canvas').forEach((c) => {
+    const big = document.createElement('canvas'); big.width = 320; big.height = 180;
+    const P = pix(big); drawWorkshopRoom(P, t); drawStreetWindow(P, t, c.dataset.board);
+    const ctx = c.getContext('2d'); ctx.imageSmoothingEnabled = false; ctx.drawImage(big, 20, 46, 80, 44, 0, 0, 80, 44);
+  });
+}
+
+/* ---------- palette and scale ---------- */
+function buildPalette() {
+  const ramps = [
+    ['Ink and night', [A.ink0, A.ink1, A.ink2]], ['Walnut', [A.wal0, A.wal1, A.wal2, A.wal3]], ['Plaster, paper', [A.pl0, A.pl1, A.pl2, A.pl3]],
+    ['Lamp', [A.lamp0, A.lamp1, A.lamp2, A.lamp3]], ['Sage', [A.sage0, A.sage1, A.sage2]], ['Dusk sky', [A.sky0, A.sky1, A.sky2, A.sky3]],
+    ['BUY ▲ blue', [A.buy0, A.buy1, A.buy2]], ['SELL ▼ orange', [A.sell0, A.sell1, A.sell2]], ['Blueprint', [A.bp0, A.bp1]], ['Alert, uncertain', [A.alert, A.unc]]
+  ];
+  const lum = (h) => { const [r, g, b] = hexRgb(h); return (0.299 * r + 0.587 * g + 0.114 * b); };
+  document.getElementById('ramps').innerHTML = ramps.map(([n, cs]) =>
+    `<div class="ramp"><span>${n}</span><div class="sw">${cs.map(c => `<div style="background:${c};color:${lum(c) > 140 ? '#17141f' : '#fbf5e8'}">${c}</div>`).join('')}</div></div>`).join('');
+  const sb = document.getElementById('scalebox');
+  const tile = (P) => { P.r(0, 0, 16, 16, A.pl0); P.r(2, 3, 12, 10, A.pl3); P.r(4, 5, 7, 2, A.ink1); P.hl(4, 9, 8, A.ink2); P.r(7, 2, 3, 3, A.sell1); P.p(7, 2, A.lamp3); };
+  [[1, '1× source · 16 px tile'], [4, '4× world layer'], [2, '2× UI layer']].forEach(([s, label]) => {
+    const c = document.createElement('canvas'); c.width = 16; c.height = 16; tile(pix(c));
+    c.style.width = 16 * s + 'px'; c.style.height = 16 * s + 'px';
+    const f = document.createElement('figure'); f.append(c);
+    const cap = document.createElement('figcaption'); cap.textContent = label; f.append(cap); sb.append(f);
+  });
+}
+
+/* ---------- stage scaling and animation ---------- */
+const stages = [...document.querySelectorAll('.stage')];
+const fit = () => stages.forEach(s => { s.firstElementChild.style.transform = `scale(${s.clientWidth / 1280})`; });
+new ResizeObserver(fit).observe(document.body);
+fit();
+
+const homeA = pix(document.getElementById('home-a')), homeB = pix(document.getElementById('home-b'));
+let hiA = null, hiB = null, tick = 0;
+const renderA = () => drawHomeA(homeA, tick, hiA);
+const renderB = () => drawHomeB(homeB, tick, hiB);
+renderA(); renderB();
+buildHud(document.getElementById('hud-a'), 'a', BOX_A, document.getElementById('home-a'), (k) => { hiA = k; renderA(); });
+buildHud(document.getElementById('hud-b'), 'b', BOX_B, document.getElementById('home-b'), (k) => { hiB = k; renderB(); });
+buildWorkspace(document.querySelector('#ws-a .stage-inner'));
+buildWorkspace(document.querySelector('#ws-b .stage-inner'));
+buildStamps(); drawStates(0); buildPalette();
+
+const visible = new Set();
+const io = new IntersectionObserver((es) => es.forEach(e => e.isIntersecting ? visible.add(e.target.id) : visible.delete(e.target.id)));
+['stage-a', 'stage-b', 'stamps'].forEach(id => io.observe(document.getElementById(id)));
+let last = 0;
+function loop(now) {
+  requestAnimationFrame(loop);
+  if (reduced || now - last < 160) return;
+  last = now; tick++;
+  if (visible.has('stage-a')) renderA();
+  if (visible.has('stage-b')) renderB();
+  if (visible.has('stamps') && tick % 2 === 0) drawStates(tick);
+}
+requestAnimationFrame(loop);
+
+const mt = document.getElementById('motion-toggle');
+mt.setAttribute('aria-pressed', reduced);
+mt.addEventListener('click', () => {
+  reduced = !reduced; mt.setAttribute('aria-pressed', reduced);
+  document.documentElement.classList.toggle('reduced', reduced);
+  renderA(); renderB(); drawStates(tick);
+});
+})();
+</script>
